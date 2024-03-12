@@ -1229,7 +1229,7 @@ where
             .await
     }
 
-    pub async fn wait_connected(&mut self) -> Result<(), EspError> {
+    pub async fn wait_connected(&self) -> Result<(), EspError> {
         self.eth_wait_while(
             |this| this.eth.is_connected().map(|s| !s),
             Some(CONNECT_TIMEOUT),
