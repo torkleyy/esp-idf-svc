@@ -112,3 +112,13 @@ impl From<Newtype<esp_netif_ip_info_t>> for ipv4::IpInfo {
         }
     }
 }
+
+impl From<ipv4::IpInfo> for Newtype<esp_netif_ip_info_t> {
+    fn from(ip_info: ipv4::IpInfo) -> Self {
+        Newtype(esp_netif_ip_info_t {
+            ip: Newtype::<esp_ip4_addr_t>::from(ip_info.ip),
+            netmask: Newtype::<esp_ip4_addr_t>::from(ip_info.subnet.mask),
+            gw: Newtype::<esp_ip4_addr_t>::from(ip_info.subnet.gateway),
+        })
+    }
+}
