@@ -799,9 +799,48 @@ mod esptls {
         /// * `ESP_FAIL` if connection could not be established
         #[cfg(esp_idf_esp_tls_server)]
         pub async fn negotiate_server(&mut self, cfg: &ServerConfig<'_>) -> Result<(), EspError> {
-            // FIXME: this isn't actually async, but esp-idf does not expose anything else.
-            // we would have to use various hacks to call mbedtls_ssl_handshake by ourself
-            self.0.borrow_mut().negotiate_server(cfg)
+            let mut bufs = RawConfigBufs::default();
+            let mut rcfg = cfg.try_into_raw(&mut bufs)?;
+
+            unsafe {
+                let error = sys::esp_tls_server_session_init(
+                    &mut rcfg,
+                    self.0.borrow().socket.handle(),
+                    self.0.borrow().raw,
+                );
+                if error != 0 {
+                    log::error!("failed to init tls server session (error {error})");
+                    return Err(EspError::from_infallible::<ESP_FAIL>());
+                }
+
+                loop {
+                    let ret = sys::esp_tls_server_session_continue_async(self.0.borrow().raw);
+
+                    let ret = match ret {
+                        1 => Ok(()),
+                        ESP_TLS_ERR_SSL_WANT_READ => Err(EspError::from_infallible::<
+                            { ESP_TLS_ERR_SSL_WANT_READ as i32 },
+                        >()),
+                        ESP_TLS_ERR_SSL_WANT_WRITE => Err(EspError::from_infallible::<
+                            { ESP_TLS_ERR_SSL_WANT_WRITE as i32 },
+                        >()),
+                        0 => Err(EspError::from_infallible::<{ EWOULDBLOCK as i32 }>()),
+                        _ => Err(EspError::from_infallible::<ESP_FAIL>()),
+                    };
+
+                    match ret {
+                        Ok(()) => break,
+                        Err(e) => self.wait(e).await?,
+                    }
+                }
+            }
+            self.0.borrow_mut().server_session = true;
+
+            // Make sure buffers are held long enough
+            #[allow(clippy::drop_non_drop)]
+            drop(bufs);
+
+            Ok(())
         }
 
         /// Read in the supplied buffer. Returns the number of bytes read.
