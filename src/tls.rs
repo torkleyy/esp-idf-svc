@@ -211,7 +211,7 @@ mod esptls {
             // allow up to 9 protocols
             if let Some(protos) = self.alpn_protos {
                 bufs.alpn_protos = cstr_arr_from_str_slice(protos, &mut bufs.alpn_protos_cbuf)?;
-                rcfg.alpn_protos = bufs.alpn_protos.as_mut_ptr();
+                rcfg.alpn_protos = bufs.alpn_protos.as_mut_ptr() as *mut *const u8;
             }
 
             rcfg.non_block = self.non_block;
@@ -359,7 +359,7 @@ mod esptls {
             // allow up to 9 protocols
             if let Some(protos) = self.alpn_protos {
                 bufs.alpn_protos = cstr_arr_from_str_slice(protos, &mut bufs.alpn_protos_cbuf)?;
-                rcfg.alpn_protos = bufs.alpn_protos.as_mut_ptr();
+                rcfg.alpn_protos = bufs.alpn_protos.as_mut_ptr() as *mut *const u8;
             }
 
             rcfg.use_secure_element = self.use_secure_element;
@@ -558,7 +558,7 @@ mod esptls {
             let ret = unsafe {
                 if asynch {
                     sys::esp_tls_conn_new_async(
-                        host.as_bytes().as_ptr() as *const i8,
+                        host.as_bytes().as_ptr() as *const u8,
                         host.len() as i32,
                         port as i32,
                         cfg,
@@ -566,7 +566,7 @@ mod esptls {
                     )
                 } else {
                     sys::esp_tls_conn_new_sync(
-                        host.as_bytes().as_ptr() as *const i8,
+                        host.as_bytes().as_ptr() as *const u8,
                         host.len() as i32,
                         port as i32,
                         cfg,
