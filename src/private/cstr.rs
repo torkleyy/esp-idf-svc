@@ -160,7 +160,7 @@ pub fn cstr_arr_from_str_slice<const N: usize>(
         cbuf[..s.len()].copy_from_slice(s.as_bytes());
         cbuf[s.len()] = b'\0';
         let cstr = CStr::from_bytes_with_nul(&cbuf[..s.len() + 1]).unwrap();
-        cstrs[i] = cstr.as_ptr();
+        cstrs[i] = cstr.as_ptr() as *const i8;
 
         cbuf = &mut cbuf[s.len() + 1..];
     }

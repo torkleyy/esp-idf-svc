@@ -12,7 +12,9 @@
 #![no_std]
 #![allow(async_fn_in_trait)]
 #![allow(unknown_lints)]
+#![allow(unexpected_cfgs)]
 #![allow(renamed_and_removed_lints)]
+#![allow(static_mut_refs)]
 #![warn(clippy::large_futures)]
 
 #[cfg(feature = "std")]
