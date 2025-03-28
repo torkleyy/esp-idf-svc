@@ -1,12 +1,17 @@
 //! Logging
 use core::fmt::Write;
 
-use ::log::{Level, LevelFilter, Metadata, Record};
+use alloc::collections::BTreeMap;
+use alloc::string::String;
 
-use crate::sys::*;
+use ::log::{Level, LevelFilter, Metadata, Record};
 
 use crate::private::common::*;
 use crate::private::cstr::*;
+use crate::private::mutex::Mutex;
+use crate::sys::*;
+
+extern crate alloc;
 
 /// Exposes the newlib stdout file descriptor to allow writing formatted
 /// messages to stdout without a std dependency or allocation
@@ -61,6 +66,7 @@ impl core::fmt::Write for EspStdout {
 }
 
 #[allow(non_upper_case_globals)]
+#[allow(non_snake_case)]
 impl From<Newtype<esp_log_level_t>> for LevelFilter {
     fn from(level: Newtype<esp_log_level_t>) -> Self {
         match level.0 {
@@ -89,6 +95,7 @@ impl From<LevelFilter> for Newtype<esp_log_level_t> {
 }
 
 #[allow(non_upper_case_globals)]
+#[allow(non_snake_case)]
 impl From<Newtype<esp_log_level_t>> for Level {
     fn from(level: Newtype<esp_log_level_t>) -> Self {
         match level.0 {
@@ -114,14 +121,27 @@ impl From<Level> for Newtype<esp_log_level_t> {
     }
 }
 
-static LOGGER: EspLogger = EspLogger;
+static LOGGER: EspLogger = EspLogger::new();
 
-pub struct EspLogger;
+pub struct EspLogger {
+    // esp-idf function `esp_log_level_get` builds a cache using the address
+    // of the target and not doing a string compare. This means we need to
+    // build a cache of our own mapping the str value to a consistant
+    // Cstr value.
+    cache: Mutex<BTreeMap<String, CString>>,
+}
 
 unsafe impl Send for EspLogger {}
 unsafe impl Sync for EspLogger {}
 
 impl EspLogger {
+    /// Public in case user code would like to compose this logger in their own one
+    pub const fn new() -> Self {
+        Self {
+            cache: Mutex::new(BTreeMap::new()),
+        }
+    }
+
     pub fn initialize_default() {
         ::log::set_logger(&LOGGER)
             .map(|()| LOGGER.initialize())
@@ -141,7 +161,19 @@ impl EspLogger {
         target: impl AsRef<str>,
         level_filter: LevelFilter,
     ) -> Result<(), EspError> {
-        let ctarget = to_cstring_arg(target.as_ref())?;
+        let target = target.as_ref();
+
+        let mut cache = self.cache.lock();
+
+        let ctarget = loop {
+            if let Some(ctarget) = cache.get(target) {
+                break ctarget;
+            }
+
+            let ctarget = to_cstring_arg(target)?;
+
+            cache.insert(target.into(), ctarget);
+        };
 
         unsafe {
             esp_log_level_set(
@@ -163,10 +195,10 @@ impl EspLogger {
         }
     }
 
-    fn get_color(level: Level) -> Option<u8> {
+    fn get_color(_level: Level) -> Option<u8> {
         #[cfg(esp_idf_log_colors)]
         {
-            match level {
+            match _level {
                 Level::Error => Some(31), // LOG_COLOR_RED
                 Level::Warn => Some(33),  // LOG_COLOR_BROWN
                 Level::Info => Some(32),  // LOG_COLOR_GREEN,
@@ -180,20 +212,10 @@ impl EspLogger {
         }
     }
 
-    #[cfg(not(all(esp_idf_version_major = "4", esp_idf_version_minor = "3")))]
-    fn should_log(record: &Record) -> bool {
-        use crate::private::mutex::Mutex;
-        use alloc::collections::BTreeMap;
-
-        // esp-idf function `esp_log_level_get` builds a cache using the address
-        // of the target and not doing a string compare.  This means we need to
-        // build a cache of our own mapping the str value to a consistant
-        // Cstr value.
-        static TARGET_CACHE: Mutex<BTreeMap<alloc::string::String, CString>> =
-            Mutex::new(BTreeMap::new());
+    fn should_log(&self, record: &Record) -> bool {
         let level = Newtype::<esp_log_level_t>::from(record.level()).0;
 
-        let mut cache = TARGET_CACHE.lock();
+        let mut cache = self.cache.lock();
 
         let ctarget = loop {
             if let Some(ctarget) = cache.get(record.target()) {
@@ -210,11 +232,11 @@ impl EspLogger {
         let max_level = unsafe { esp_log_level_get(ctarget.as_c_str().as_ptr()) };
         level <= max_level
     }
+}
 
-    #[cfg(all(esp_idf_version_major = "4", esp_idf_version_minor = "3"))]
-    fn should_log(_record: &Record) -> bool {
-        // No esp_log_level_get on ESP-IDF V4.3
-        true
+impl Default for EspLogger {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -226,9 +248,8 @@ impl ::log::Log for EspLogger {
     fn log(&self, record: &Record) {
         let metadata = record.metadata();
 
-        if self.enabled(metadata) && Self::should_log(record) {
+        if self.enabled(metadata) && self.should_log(record) {
             let marker = Self::get_marker(metadata.level());
-            let timestamp = unsafe { esp_log_timestamp() };
             let target = record.metadata().target();
             let args = record.args();
             let color = Self::get_color(record.level());
@@ -236,15 +257,26 @@ impl ::log::Log for EspLogger {
             let mut stdout = EspStdout::new();
 
             if let Some(color) = color {
-                writeln!(
-                    stdout,
-                    "\x1b[0;{}m{} ({}) {}: {}\x1b[0m",
-                    color, marker, timestamp, target, args
-                )
-                .unwrap();
-            } else {
-                writeln!(stdout, "{} ({}) {}: {}", marker, timestamp, target, args).unwrap();
+                write!(stdout, "\x1b[0;{}m", color).unwrap();
             }
+            write!(stdout, "{} (", marker).unwrap();
+            if cfg!(esp_idf_log_timestamp_source_rtos) {
+                let timestamp = unsafe { esp_log_timestamp() };
+                write!(stdout, "{}", timestamp).unwrap();
+            } else if cfg!(esp_idf_log_timestamp_source_system) {
+                // TODO: https://github.com/esp-rs/esp-idf-svc/pull/494 - official usage of
+                // `esp_log_timestamp_str()` should be tracked and replace the not thread-safe
+                // `esp_log_system_timestamp()` which has a race condition flaw due to
+                // returning a pointer to a static buffer containing the c-string.
+                let timestamp =
+                    unsafe { CStr::from_ptr(esp_log_system_timestamp()).to_str().unwrap() };
+                write!(stdout, "{}", timestamp).unwrap();
+            }
+            write!(stdout, ") {}: {}", target, args).unwrap();
+            if color.is_some() {
+                write!(stdout, "\x1b[0m").unwrap();
+            }
+            writeln!(stdout).unwrap();
         }
     }
 

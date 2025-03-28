@@ -5,6 +5,112 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.51.0] - 2025-01-15
+
+### Breaking
+- New `embassy-time-driver` implementation compatible with `embassy-time-driver` V0.2 (#548)
+
+### Added
+- New example, `wifi_dhcp_with_hostname` to demonstrate setting a custom hostname when establishing a DHCP connection
+
+## [0.50.1] - 2025-01-06
+### Fixed
+- Fix ambiguous name error (a compilation issue when the NimBLE component is enabled in esp-idf-sys)
+
+## [0.50.0] - 2025-01-02
+
+### Deprecated
+- `EspFirmwareInfoLoader` use `EspFirmwareInfoLoad` instead
+
+### Breaking
+- Wifi event details (#455)
+- Add poll_read/write and implement futures_io::AsyncRead/Write for EspAsyncTls (#488)
+- Support for LittleFS (#498)
+- Change default eth key (#502)
+- ESP IDF Partitions API (#511)
+- Expose src_addr and dst_addr in espnow recv cb (#525)
+
+### Added
+- Compatibility with ESP-IDF v5.3.X
+- feat(eth): Implement alternative polling mode (#452)
+- SD Card driver; SD Card host drivers (SPI and SDMMC) (#454)
+- Make EspAsyncMqttClient::wrap public. (#462)
+- Netif-driver support
+- Netif PPP (#473)
+- Added http_local_network_server example (#471)
+- Added esp_wifi_sta_get_rssi function in EspWifi (#478)
+- Expose esp_mqtt_client_set_uri. Fix issue #481. (#482)
+- Option to explicitly initialize the netif stack (NetifStack::initialize)
+- Support for Thread (#484)
+- Enable usage of `esp_idf_log_timestamp_rtos` for ms since boot and `esp_idf_log_timestamp_source_system` for system time in rust logging (#494)
+- Document OTA API (#500)
+- Add option to specify initial caps for the MQTT async adaptor vectors
+- Allow using esp timer with skip_unhandled_events (#526)
+- OTA - Implements a new type `EspFirmwareInfoLoad` that has a reduced memory consumption (#531)
+- Added set_promiscuous function in EthDriver (#246)
+- Added set_promiscuous, is_promiscuous functions in WifiDriver (#246)
+- Blocking and buffered StdIo (#541) - i.e. easy reading/input from `std::io::stdin`
+- Added source_ipv4, source_ipv6 function in EspHttpRawConnection (#538)
+
+### Fixed
+- The alloc::Vec version stomps the scan state from Done to Idle. (#459)
+- Logging - Fix set_target_level (#458)
+- Make async mqtt client implement Send. (#461)
+- Implement Sync for EspMqttEvent. (#463)
+- Avoid potential memory leak when dropping mqtt clients (#464)
+- Filter asynchronous events (#466)
+- Remove unnecessary buffer draining in HTTP client example (#470)
+- Fixed: EspLogger is not extensible
+- Fix incorrect key variable being logged for the struct storage for raw NVS access example (#479)
+- `eth_esp32_emac_default_config` - 5.3 compatibility
+- Fix "esp32c2 use example http_sw_server report err ESP_ERR_HTTPD_TASK"
+- Added IP_EVENT_ETH_LOST_IP to deserialize list (#491)
+- examples/http_ws_server.rs: fix string decoding (#510)
+- Bugfix: crash on MQTT async client restart
+- Fix missing newline if CONFIG_LOG_COLORS=n is set (#521)
+- gatekeep mdns ipv6 behind feature flag (#523)
+- Fix emac_rx stack overflow when log verbosity is increased (#535)
+
+## [0.49.1] - 2024-07-09
+### Fixed
+* Bluetooth: The experimental Bluedroid support did not compile on esp32c2, esp32h2 and esp32c6 (#447)
+
+## [0.49.0] - 2024-06-23
+
+### Deprecated
+**ESP-IDF v4.4** Please start upgrading to ESP-IDF v5.
+### Breaking
+* **removed** ESP-IDF v4.3 support, including mostly conditional compilations. (#431)
+* wifi: now can use embedded-svc PmfConfiguration, ScanMethod, and ScanSortMethod in ClientConfiguration. (#381)
+* wifi: The WifiEvent's ApStaConnected and ApStaDisconnected were changed to include the idf's wifi_event. (#396)
+* eth: callbacks now use newly added EthFrames instead of &[u8]. (#406)
+* wifi: callbacks now use newly added WifiFrames instead of &[u8]. (#406)
+* http_server: Configuration now allows for setting the ctrl_port. (#427)
+* http_server: UB fix: `handler`, `fn_handler` and `handler_chain` all now only accept `'static` callbacks,
+  which is the only safe option in the presence of `core::mem::forget` on the HTTP server. All of those have the
+  previous behavior preserved in the form of `unsafe` `*_nonstatic` variants which were added. (#437)
+* tls: negotiate now returns the new CompletedHandshake struct instead of (). (#428)
+* wifi: Remove AUTOUP as the default flag on ClientConfiguration:Fixed. (#426)
+* tls: Allow TLS negotiation on a multi-threaded executor. (#432)
+* MSRV: 1.77 (due to `core::net` which is re-exported by `embedded-svc` and is stable since Rust 1.77)
+### Added
+* tls: Support for TLS server. (#368)
+* ws: expose crt_bundle_attach to EspWebSocketClientConfig. (#391)
+* ping: can now be used with disabled IPv6. (#418)
+* wifi: EspWifi's wrap_all method now supports only wrapping sta if softAp is disabled. (#376)
+* sd: **New SD mmc & spi drivers**. Check out the sd_mmc and sd_spi examples. (#422)
+* fs: new wrapper implementation around fat. (#422)
+* tls: Make EspTls and EspAsyncTls Send when possible. (#429)
+* ble/gatt: **New BLE GATT server support using Bluedroid.** Check out the bt_gatt_server example. (#421)
+### Fixed
+* nvs: encrypted partition could not find partition by name. (#387)
+* ota: handle partition errors gracefully. (#393)
+* http_client: flush responses to avoid repeated request failures. (#404)
+* eth: missing error return inside the rx_callback function. (#414)
+* wifi: AccessPointConfiguration now correctly limits max_connections. (#426)
+* wifi: Fix WPS regression around null termination of ssid/password. (#379)
+* Compatibility with ESP-IDF v5.3 (pre-release): various fixes such that esp-idf-svc can be used against the latest esp-idf versions. (#434)
+
 ## [0.48.1] - 2024-02-21
 * Disable the `esp_idf_svc::io::vfs` module if the ESP IDF VFS component is not enabled either
 * Bugfix / async MQTT: The internal `Unblocker` utility was missing `drop` and therefore did not delete its task properly, resulting in a crash when the async MQTT client is dropped

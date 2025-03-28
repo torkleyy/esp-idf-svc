@@ -84,7 +84,6 @@ pub struct Configuration {
     pub client_certificate: Option<X509<'static>>,
     pub private_key: Option<X509<'static>>,
     pub use_global_ca_store: bool,
-    #[cfg(not(esp_idf_version = "4.3"))]
     pub crt_bundle_attach: Option<unsafe extern "C" fn(conf: *mut core::ffi::c_void) -> esp_err_t>,
     pub raw_request_body: bool,
 }
@@ -113,6 +112,7 @@ impl EspHttpConnection {
     pub fn new(configuration: &Configuration) -> Result<Self, EspError> {
         let event_handler = Box::new(None);
 
+        #[allow(clippy::manual_c_str_literals)]
         let mut native_config = esp_http_client_config_t {
             // The ESP-IDF HTTP client is really picky on being initialized with a valid URL
             // So we set something here, which will be changed later anyway, in the request() method
@@ -121,7 +121,6 @@ impl EspHttpConnection {
             user_data: &*event_handler as *const _ as *mut core::ffi::c_void,
 
             use_global_ca_store: configuration.use_global_ca_store,
-            #[cfg(not(esp_idf_version = "4.3"))]
             crt_bundle_attach: configuration.crt_bundle_attach,
 
             ..Default::default()
@@ -208,6 +207,11 @@ impl EspHttpConnection {
         uri: &'a str,
         headers: &'a [(&'a str, &'a str)],
     ) -> Result<(), EspError> {
+        // If response data from the previous request remains, subsequent requests may fail
+        if self.is_response_initiated() {
+            self.flush_response()?;
+        }
+
         self.assert_initial();
 
         let c_uri = to_cstring_arg(uri)?;
@@ -353,6 +357,13 @@ impl EspHttpConnection {
         } else {
             Ok(())
         }
+    }
+
+    fn flush_response(&mut self) -> Result<(), EspError> {
+        let mut len = 0_i32;
+        esp!(unsafe { esp_http_client_flush_response(self.raw_client, &mut len) })?;
+
+        Ok(())
     }
 
     fn raw_write(&mut self, buf: &[u8]) -> Result<usize, EspError> {

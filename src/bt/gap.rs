@@ -12,18 +12,17 @@ use core::convert::TryInto;
 ))]
 use core::ffi;
 use core::fmt::{self, Debug};
-use core::sync::atomic::{AtomicBool, Ordering};
 use core::{borrow::Borrow, marker::PhantomData};
 
 use enumset::{EnumSet, EnumSetType};
 
 use crate::sys::*;
 
-use log::info;
+use ::log::debug;
 
 use num_enum::TryFromPrimitive;
 
-use super::{BdAddr, BtCallback, BtClassicEnabled, BtDriver, BtStatus, BtUuid};
+use super::{BdAddr, BtClassicEnabled, BtDriver, BtSingleton, BtStatus, BtUuid};
 
 #[cfg(esp_idf_bt_ssp_enabled)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, TryFromPrimitive)]
@@ -54,7 +53,7 @@ pub enum InqMode {
 #[repr(transparent)]
 pub struct Eir<'a>(&'a [u8]);
 
-impl<'a> Eir<'a> {
+impl Eir<'_> {
     pub fn flags<'d, M, T>(&self, _gap: &EspGap<'d, M, T>) -> Option<EnumSet<EirFlags>>
     where
         M: BtClassicEnabled,
@@ -230,7 +229,7 @@ impl<'a> From<&EirData<'a>> for esp_bt_eir_data_t {
     }
 }
 
-impl<'a> From<&esp_bt_eir_data_t> for EirData<'a> {
+impl From<&esp_bt_eir_data_t> for EirData<'_> {
     fn from(data: &esp_bt_eir_data_t) -> Self {
         Self {
             fec_required: data.fec_required,
@@ -368,7 +367,7 @@ pub struct PropData<'a> {
 }
 
 #[allow(non_upper_case_globals)]
-impl<'a> PropData<'a> {
+impl PropData<'_> {
     pub fn prop(&self) -> DeviceProp {
         unsafe {
             match self.data.type_ {
@@ -401,7 +400,7 @@ impl<'a> PropData<'a> {
 
 pub struct EventRawData<'a>(pub &'a esp_bt_gap_cb_param_t);
 
-impl<'a> Debug for EventRawData<'a> {
+impl Debug for EventRawData<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("EventRawData").finish()
     }
@@ -555,7 +554,7 @@ impl<'a> From<(esp_bt_gap_cb_event_t, &'a esp_bt_gap_cb_param_t)> for GapEvent<'
                 },
                 esp_bt_gap_cb_event_t_ESP_BT_GAP_CONFIG_EIR_DATA_EVT => Self::EirDataConfigured {
                     status: param.config_eir_data.stat.try_into().unwrap(),
-                    eir_types: core::mem::transmute(
+                    eir_types: core::mem::transmute::<&[u8], &[EirType]>(
                         &param.config_eir_data.eir_type[..param.config_eir_data.eir_type_num as _],
                     ),
                 },
@@ -612,7 +611,6 @@ where
     T: Borrow<BtDriver<'d, M>>,
 {
     _driver: T,
-    initialized: AtomicBool,
     _p: PhantomData<&'d ()>,
     _m: PhantomData<M>,
 }
@@ -622,28 +620,33 @@ where
     M: BtClassicEnabled,
     T: Borrow<BtDriver<'d, M>>,
 {
-    pub const fn new(driver: T) -> Result<Self, EspError> {
+    pub fn new(driver: T) -> Result<Self, EspError> {
+        SINGLETON.take()?;
+
+        esp!(unsafe { esp_bt_gap_register_callback(Some(Self::event_handler)) })?;
+
         Ok(Self {
             _driver: driver,
-            initialized: AtomicBool::new(false),
             _p: PhantomData,
             _m: PhantomData,
         })
     }
 
-    pub fn initialize<F>(&self, events_cb: F) -> Result<(), EspError>
+    pub fn subscribe<F>(&self, events_cb: F) -> Result<(), EspError>
     where
-        F: Fn(GapEvent) + Send + 'static,
+        F: FnMut(GapEvent) + Send + 'static,
     {
-        self.internal_initialize(events_cb)
+        SINGLETON.subscribe(events_cb);
+
+        Ok(())
     }
 
     /// # Safety
     ///
-    /// This method - in contrast to method `initialize` - allows the user to pass
+    /// This method - in contrast to method `subscribe` - allows the user to pass
     /// a non-static callback/closure. This enables users to borrow
     /// - in the closure - variables that live on the stack - or more generally - in the same
-    /// scope where the service is created.
+    ///   scope where the service is created.
     ///
     /// HOWEVER: care should be taken NOT to call `core::mem::forget()` on the service,
     /// as that would immediately lead to an UB (crash).
@@ -661,22 +664,17 @@ where
     ///
     /// This "local borrowing" will only be possible to express in a safe way once/if `!Leak` types
     /// are introduced to Rust (i.e. the impossibility to "forget" a type and thus not call its destructor).
-    pub unsafe fn initialize_nonstatic<F>(&self, events_cb: F) -> Result<(), EspError>
+    pub unsafe fn subscribe_nonstatic<F>(&self, events_cb: F) -> Result<(), EspError>
     where
-        F: Fn(GapEvent) + Send + 'd,
+        F: FnMut(GapEvent) + Send + 'd,
     {
-        self.internal_initialize(events_cb)
+        SINGLETON.subscribe(events_cb);
+
+        Ok(())
     }
 
-    fn internal_initialize<F>(&self, events_cb: F) -> Result<(), EspError>
-    where
-        F: Fn(GapEvent) + Send + 'd,
-    {
-        CALLBACK.set(events_cb)?;
-
-        esp!(unsafe { esp_bt_gap_register_callback(Some(Self::event_handler)) })?;
-
-        self.initialized.store(true, Ordering::SeqCst);
+    pub fn unsubscribe(&self) -> Result<(), EspError> {
+        SINGLETON.unsubscribe();
 
         Ok(())
     }
@@ -818,9 +816,9 @@ where
         let param = unsafe { param.as_ref() }.unwrap();
         let event = GapEvent::from((event, param));
 
-        info!("Got event {{ {:#?} }}", event);
+        debug!("Got event {{ {:#?} }}", event);
 
-        CALLBACK.call(event);
+        SINGLETON.call(event);
     }
 }
 
@@ -830,10 +828,29 @@ where
     T: Borrow<BtDriver<'d, M>>,
 {
     fn drop(&mut self) {
-        if self.initialized.load(Ordering::SeqCst) {
-            CALLBACK.clear().unwrap();
-        }
+        self.unsubscribe().unwrap();
+
+        // Not possible because this function rejects NULL arguments
+        // esp!(unsafe { esp_bt_gap_register_callback(None) }).unwrap();
+
+        SINGLETON.release().unwrap();
     }
 }
 
-static CALLBACK: BtCallback<GapEvent, ()> = BtCallback::new(());
+unsafe impl<'d, M, T> Send for EspGap<'d, M, T>
+where
+    M: BtClassicEnabled,
+    T: Borrow<BtDriver<'d, M>> + Send,
+{
+}
+
+// Safe because the ESP IDF Bluedroid APIs all do message passing
+// to a dedicated Bluedroid task
+unsafe impl<'d, M, T> Sync for EspGap<'d, M, T>
+where
+    M: BtClassicEnabled,
+    T: Borrow<BtDriver<'d, M>> + Send,
+{
+}
+
+static SINGLETON: BtSingleton<GapEvent, ()> = BtSingleton::new(());

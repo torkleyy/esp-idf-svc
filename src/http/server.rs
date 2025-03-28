@@ -23,9 +23,9 @@
 //! make sure it's not dropped - you may add an infinite loop after the server
 //! is created, use `core::mem::forget`, or keep around a reference to it somehow.
 //!
-//! You can find an example of handling GET/POST requests at [`json_post_handler.rs`](https://github.com/esp-rs/esp-idf-svc/blob/master/examples/json_post_handler.rs).
+//! You can find an example of handling GET/POST requests at [`examples/http_server.rs`](https://github.com/esp-rs/esp-idf-svc/blob/master/examples/http_server.rs).
 //!
-//! You can find an example of HTTP+Websockets at [`examples/ws_guessing_game.js`](https://github.com/esp-rs/esp-idf-svc/blob/master/examples/ws_guessing_game.rs).
+//! You can find an example of HTTP+Websockets at [`examples/http_ws_server.rs`](https://github.com/esp-rs/esp-idf-svc/blob/master/examples/http_ws_server.rs).
 //!
 //! By default, the ESP-IDF library allocates 512 bytes for reading and parsing
 //! HTTP headers, but desktop web browsers might send headers longer than that.
@@ -35,6 +35,10 @@
 use core::cell::UnsafeCell;
 use core::fmt::Debug;
 use core::marker::PhantomData;
+#[cfg(esp_idf_lwip_ipv4)]
+use core::net::Ipv4Addr;
+#[cfg(esp_idf_lwip_ipv6)]
+use core::net::Ipv6Addr;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::*;
 use core::{ffi, ptr};
@@ -77,6 +81,7 @@ pub use super::*;
 #[derive(Copy, Clone, Debug)]
 pub struct Configuration {
     pub http_port: u16,
+    pub ctrl_port: u16,
     pub https_port: u16,
     pub max_sessions: usize,
     pub session_timeout: Duration,
@@ -96,6 +101,7 @@ impl Default for Configuration {
     fn default() -> Self {
         Configuration {
             http_port: 80,
+            ctrl_port: 32768,
             https_port: 443,
             max_sessions: 16,
             session_timeout: Duration::from_secs(20 * 60),
@@ -121,10 +127,23 @@ impl From<&Configuration> for Newtype<httpd_config_t> {
     fn from(conf: &Configuration) -> Self {
         Self(httpd_config_t {
             task_priority: 5,
+            // Since 5.3.0
+            #[cfg(any(
+                all(not(esp_idf_version_major = "4"), not(esp_idf_version_major = "5")),
+                all(
+                    esp_idf_version_major = "5",
+                    not(any(
+                        esp_idf_version_minor = "0",
+                        esp_idf_version_minor = "1",
+                        esp_idf_version_minor = "2"
+                    ))
+                ),
+            ))]
+            task_caps: (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
             stack_size: conf.stack_size,
             core_id: i32::MAX,
             server_port: conf.http_port,
-            ctrl_port: 32768,
+            ctrl_port: conf.ctrl_port,
             max_open_sockets: conf.max_open_sockets as _,
             max_uri_handlers: conf.max_uri_handlers as _,
             max_resp_headers: conf.max_resp_headers as _,
@@ -297,7 +316,7 @@ impl<'a> EspHttpServer<'a> {
     /// This method - in contrast to method `new` - allows the user to set
     /// non-static callbacks/closures as handlers into the returned `EspHttpServer` service. This enables users to borrow
     /// - in the closure - variables that live on the stack - or more generally - in the same
-    /// scope where the service is created.
+    ///   scope where the service is created.
     ///
     /// HOWEVER: care should be taken NOT to call `core::mem::forget()` on the service,
     /// as that would immediately lead to an UB (crash).
@@ -437,8 +456,77 @@ impl<'a> EspHttpServer<'a> {
         Ok(self)
     }
 
-    // Registers a `Handler` for a URI and a method (GET, POST, etc).
+    /// # Safety
+    ///
+    /// This method - in contrast to method `handler_chain` - allows the user to pass
+    /// a chain of non-static callbacks/closures. This enables users to borrow
+    /// - in the closure - variables that live on the stack - or more generally - in the same
+    ///   scope where the service is created.
+    ///
+    /// HOWEVER: care should be taken NOT to call `core::mem::forget()` on the service,
+    /// as that would immediately lead to an UB (crash).
+    /// Also note that forgetting the service might happen with `Rc` and `Arc`
+    /// when circular references are introduced: https://github.com/rust-lang/rust/issues/24456
+    ///
+    /// The reason is that the closure is actually sent to a hidden ESP IDF thread.
+    /// This means that if the service is forgotten, Rust is free to e.g. unwind the stack
+    /// and the closure now owned by this other thread will end up with references to variables that no longer exist.
+    ///
+    /// The destructor of the service takes care - prior to the service being dropped and e.g.
+    /// the stack being unwind - to remove the closure from the hidden thread and destroy it.
+    /// Unfortunately, when the service is forgotten, the un-subscription does not happen
+    /// and invalid references are left dangling.
+    ///
+    /// This "local borrowing" will only be possible to express in a safe way once/if `!Leak` types
+    /// are introduced to Rust (i.e. the impossibility to "forget" a type and thus not call its destructor).
+    pub unsafe fn handler_chain_nonstatic<C>(&mut self, chain: C) -> Result<&mut Self, EspError>
+    where
+        C: EspHttpTraversableChainNonstatic<'a>,
+    {
+        chain.accept(self)?;
+
+        Ok(self)
+    }
+
+    /// Registers a `Handler` for a URI and a method (GET, POST, etc).
     pub fn handler<H>(
+        &mut self,
+        uri: &str,
+        method: Method,
+        handler: H,
+    ) -> Result<&mut Self, EspError>
+    where
+        H: for<'r> Handler<EspHttpConnection<'r>> + Send + 'static,
+    {
+        unsafe { self.handler_nonstatic(uri, method, handler) }
+    }
+
+    /// Registers a `Handler` for a URI and a method (GET, POST, etc).
+    ///
+    /// # Safety
+    ///
+    /// This method - in contrast to method `handler` - allows the user to pass
+    /// a non-static callback/closure. This enables users to borrow
+    /// - in the closure - variables that live on the stack - or more generally - in the same
+    ///   scope where the service is created.
+    ///
+    /// HOWEVER: care should be taken NOT to call `core::mem::forget()` on the service,
+    /// as that would immediately lead to an UB (crash).
+    /// Also note that forgetting the service might happen with `Rc` and `Arc`
+    /// when circular references are introduced: https://github.com/rust-lang/rust/issues/24456
+    ///
+    /// The reason is that the closure is actually sent to a hidden ESP IDF thread.
+    /// This means that if the service is forgotten, Rust is free to e.g. unwind the stack
+    /// and the closure now owned by this other thread will end up with references to variables that no longer exist.
+    ///
+    /// The destructor of the service takes care - prior to the service being dropped and e.g.
+    /// the stack being unwind - to remove the closure from the hidden thread and destroy it.
+    /// Unfortunately, when the service is forgotten, the un-subscription does not happen
+    /// and invalid references are left dangling.
+    ///
+    /// This "local borrowing" will only be possible to express in a safe way once/if `!Leak` types
+    /// are introduced to Rust (i.e. the impossibility to "forget" a type and thus not call its destructor).
+    pub unsafe fn handler_nonstatic<H>(
         &mut self,
         uri: &str,
         method: Method,
@@ -483,10 +571,52 @@ impl<'a> EspHttpServer<'a> {
         f: F,
     ) -> Result<&mut Self, EspError>
     where
+        F: for<'r> Fn(Request<&mut EspHttpConnection<'r>>) -> Result<(), E> + Send + 'static,
+        E: Debug,
+    {
+        unsafe { self.fn_handler_nonstatic(uri, method, f) }
+    }
+
+    /// Registers a function as the handler for the given URI and HTTP method (GET, POST, etc).
+    ///
+    /// The function will be called every time an HTTP client requests that URI
+    /// (via the appropriate HTTP method), receiving a different `Request` each
+    /// call. The `Request` contains a reference to the underlying `EspHttpConnection`.
+    ///
+    /// # Safety
+    ///
+    /// This method - in contrast to method `fn_handler` - allows the user to pass
+    /// a non-static callback/closure. This enables users to borrow
+    /// - in the closure - variables that live on the stack - or more generally - in the same
+    ///   scope where the service is created.
+    ///
+    /// HOWEVER: care should be taken NOT to call `core::mem::forget()` on the service,
+    /// as that would immediately lead to an UB (crash).
+    /// Also note that forgetting the service might happen with `Rc` and `Arc`
+    /// when circular references are introduced: https://github.com/rust-lang/rust/issues/24456
+    ///
+    /// The reason is that the closure is actually sent to a hidden ESP IDF thread.
+    /// This means that if the service is forgotten, Rust is free to e.g. unwind the stack
+    /// and the closure now owned by this other thread will end up with references to variables that no longer exist.
+    ///
+    /// The destructor of the service takes care - prior to the service being dropped and e.g.
+    /// the stack being unwind - to remove the closure from the hidden thread and destroy it.
+    /// Unfortunately, when the service is forgotten, the un-subscription does not happen
+    /// and invalid references are left dangling.
+    ///
+    /// This "local borrowing" will only be possible to express in a safe way once/if `!Leak` types
+    /// are introduced to Rust (i.e. the impossibility to "forget" a type and thus not call its destructor).
+    pub unsafe fn fn_handler_nonstatic<E, F>(
+        &mut self,
+        uri: &str,
+        method: Method,
+        f: F,
+    ) -> Result<&mut Self, EspError>
+    where
         F: for<'r> Fn(Request<&mut EspHttpConnection<'r>>) -> Result<(), E> + Send + 'a,
         E: Debug,
     {
-        self.handler(uri, method, FnHandler::new(f))
+        self.handler_nonstatic(uri, method, FnHandler::new(f))
     }
 
     fn to_native_handler<H>(&self, handler: H) -> NativeHandler<'a>
@@ -504,7 +634,12 @@ impl<'a> EspHttpServer<'a> {
                         connection.handle_error(e);
                     }
                 }
-                Err(e) => connection.handle_error(e),
+                Err(e) => {
+                    connection.handle_error(e);
+                    if let Err(e) = connection.complete() {
+                        connection.handle_error(e);
+                    }
+                }
             }
 
             ESP_OK as _
@@ -539,13 +674,13 @@ impl<'a> EspHttpServer<'a> {
     }
 }
 
-impl<'a> Drop for EspHttpServer<'a> {
+impl Drop for EspHttpServer<'_> {
     fn drop(&mut self) {
         self.stop().expect("Unable to stop the server cleanly");
     }
 }
 
-impl<'a> RawHandle for EspHttpServer<'a> {
+impl RawHandle for EspHttpServer<'_> {
     type Handle = httpd_handle_t;
 
     fn handle(&self) -> Self::Handle {
@@ -568,6 +703,15 @@ pub trait EspHttpTraversableChain<'a> {
     fn accept(self, server: &mut EspHttpServer<'a>) -> Result<(), EspError>;
 }
 
+/// # Safety
+///
+/// Implementing this trait means that the chain can contain non-`'static` handlers
+/// and that the chain can be used with method `EspHttpServer::handler_chain_nonstatic`.
+///
+/// Consult the documentation of `EspHttpServer::handler_chain_nonstatic` for more
+/// information on how to use non-static handler chains.
+pub unsafe trait EspHttpTraversableChainNonstatic<'a>: EspHttpTraversableChain<'a> {}
+
 impl<'a> EspHttpTraversableChain<'a> for ChainRoot {
     fn accept(self, _server: &mut EspHttpServer<'a>) -> Result<(), EspError> {
         Ok(())
@@ -576,7 +720,7 @@ impl<'a> EspHttpTraversableChain<'a> for ChainRoot {
 
 impl<'a, H, N> EspHttpTraversableChain<'a> for ChainHandler<H, N>
 where
-    H: for<'r> Handler<EspHttpConnection<'r>> + Send + 'a,
+    H: for<'r> Handler<EspHttpConnection<'r>> + Send + 'static,
     N: EspHttpTraversableChain<'a>,
 {
     fn accept(self, server: &mut EspHttpServer<'a>) -> Result<(), EspError> {
@@ -588,9 +732,46 @@ where
     }
 }
 
+/// A newtype wrapper for `ChainHandler` that allows
+/// non-`'static`` handlers  in the chain to be registered
+/// and passed to the server.
+pub struct NonstaticChain<H, N>(ChainHandler<H, N>);
+
+impl<H, N> NonstaticChain<H, N> {
+    /// Wraps the given chain with a `NonstaticChain` newtype.
+    pub fn new(handler: ChainHandler<H, N>) -> Self {
+        Self(handler)
+    }
+}
+
+unsafe impl EspHttpTraversableChainNonstatic<'_> for ChainRoot {}
+
+impl<'a, H, N> EspHttpTraversableChain<'a> for NonstaticChain<H, N>
+where
+    H: for<'r> Handler<EspHttpConnection<'r>> + Send + 'a,
+    N: EspHttpTraversableChain<'a>,
+{
+    fn accept(self, server: &mut EspHttpServer<'a>) -> Result<(), EspError> {
+        self.0.next.accept(server)?;
+
+        unsafe {
+            server.handler_nonstatic(self.0.path, self.0.method, self.0.handler)?;
+        }
+
+        Ok(())
+    }
+}
+
+unsafe impl<'a, H, N> EspHttpTraversableChainNonstatic<'a> for NonstaticChain<H, N>
+where
+    H: for<'r> Handler<EspHttpConnection<'r>> + Send + 'a,
+    N: EspHttpTraversableChain<'a>,
+{
+}
+
 pub struct EspHttpRawConnection<'a>(&'a mut httpd_req_t);
 
-impl<'a> EspHttpRawConnection<'a> {
+impl EspHttpRawConnection<'_> {
     pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, EspError> {
         if !buf.is_empty() {
             let fd = unsafe { httpd_req_to_sockfd(self.0) };
@@ -622,9 +803,65 @@ impl<'a> EspHttpRawConnection<'a> {
 
         Ok(())
     }
+
+    /// Retrieves the source IPv4 of the request.
+    ///
+    /// The IPv4 is retrieved using the underlying session socket.
+    #[cfg(esp_idf_lwip_ipv4)]
+    pub fn source_ipv4(&self) -> Result<Ipv4Addr, EspError> {
+        unsafe {
+            let sockfd = httpd_req_to_sockfd(self.handle());
+
+            if sockfd == -1 {
+                return Err(EspError::from_infallible::<ESP_FAIL>());
+            }
+
+            let mut addr = sockaddr_in {
+                sin_len: core::mem::size_of::<sockaddr_in>() as _,
+                sin_family: AF_INET as _,
+                ..Default::default()
+            };
+
+            esp!(lwip_getpeername(
+                sockfd,
+                &mut addr as *mut _ as *mut _,
+                &mut core::mem::size_of::<sockaddr_in>() as *mut _ as *mut _,
+            ))?;
+
+            Ok(Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr)))
+        }
+    }
+
+    /// Retrieves the source IPv6 of the request.
+    ///
+    /// The IPv6 is retrieved using the underlying session socket.
+    #[cfg(esp_idf_lwip_ipv6)]
+    pub fn source_ipv6(&self) -> Result<Ipv6Addr, EspError> {
+        unsafe {
+            let sockfd = httpd_req_to_sockfd(self.handle());
+
+            if sockfd == -1 {
+                return Err(EspError::from_infallible::<ESP_FAIL>());
+            }
+
+            let mut addr = sockaddr_in6 {
+                sin6_len: core::mem::size_of::<sockaddr_in6>() as _,
+                sin6_family: AF_INET6 as _,
+                ..Default::default()
+            };
+
+            esp!(lwip_getpeername(
+                sockfd,
+                &mut addr as *mut _ as *mut _,
+                &mut core::mem::size_of::<sockaddr_in6>() as *mut _ as *mut _,
+            ))?;
+
+            Ok(Ipv6Addr::from(addr.sin6_addr.un.u8_addr))
+        }
+    }
 }
 
-impl<'a> RawHandle for EspHttpRawConnection<'a> {
+impl RawHandle for EspHttpRawConnection<'_> {
     type Handle = *mut httpd_req_t;
 
     fn handle(&self) -> Self::Handle {
@@ -632,17 +869,17 @@ impl<'a> RawHandle for EspHttpRawConnection<'a> {
     }
 }
 
-impl<'a> ErrorType for EspHttpRawConnection<'a> {
+impl ErrorType for EspHttpRawConnection<'_> {
     type Error = EspIOError;
 }
 
-impl<'a> Read for EspHttpRawConnection<'a> {
+impl Read for EspHttpRawConnection<'_> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         EspHttpRawConnection::read(self, buf).map_err(EspIOError)
     }
 }
 
-impl<'a> Write for EspHttpRawConnection<'a> {
+impl Write for EspHttpRawConnection<'_> {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         EspHttpRawConnection::write(self, buf).map_err(EspIOError)
     }
@@ -953,7 +1190,7 @@ impl<'a> EspHttpConnection<'a> {
     }
 }
 
-impl<'a> RawHandle for EspHttpConnection<'a> {
+impl RawHandle for EspHttpConnection<'_> {
     type Handle = *mut httpd_req_t;
 
     fn handle(&self) -> Self::Handle {
@@ -961,7 +1198,7 @@ impl<'a> RawHandle for EspHttpConnection<'a> {
     }
 }
 
-impl<'a> Query for EspHttpConnection<'a> {
+impl Query for EspHttpConnection<'_> {
     fn uri(&self) -> &str {
         EspHttpConnection::uri(self)
     }
@@ -971,23 +1208,23 @@ impl<'a> Query for EspHttpConnection<'a> {
     }
 }
 
-impl<'a> embedded_svc::http::Headers for EspHttpConnection<'a> {
+impl embedded_svc::http::Headers for EspHttpConnection<'_> {
     fn header(&self, name: &str) -> Option<&str> {
         EspHttpConnection::header(self, name)
     }
 }
 
-impl<'a> ErrorType for EspHttpConnection<'a> {
+impl ErrorType for EspHttpConnection<'_> {
     type Error = EspIOError;
 }
 
-impl<'a> Read for EspHttpConnection<'a> {
+impl Read for EspHttpConnection<'_> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         EspHttpConnection::read(self, buf).map_err(EspIOError)
     }
 }
 
-impl<'a> Write for EspHttpConnection<'a> {
+impl Write for EspHttpConnection<'_> {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         EspHttpConnection::write(self, buf).map_err(EspIOError)
     }

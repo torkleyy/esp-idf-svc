@@ -49,7 +49,7 @@ pub struct BackgroundLoopConfiguration<'a> {
     pub task_pin_to_core: Core,
 }
 
-impl<'a> Default for BackgroundLoopConfiguration<'a> {
+impl Default for BackgroundLoopConfiguration<'_> {
     fn default() -> Self {
         Self {
             queue_size: 64,
@@ -217,13 +217,13 @@ impl<'a> EspEventPostData<'a> {
     }
 }
 
-unsafe impl<'a> EspEventSource for EspEventPostData<'a> {
+unsafe impl EspEventSource for EspEventPostData<'_> {
     fn source() -> Option<&'static ffi::CStr> {
         None
     }
 }
 
-impl<'a> EspEventSerializer for EspEventPostData<'a> {
+impl EspEventSerializer for EspEventPostData<'_> {
     type Data<'d> = EspEventPostData<'d>;
 
     fn serialize<F, R>(data: &Self::Data<'_>, f: F) -> R
@@ -268,13 +268,13 @@ impl<'a> EspEvent<'a> {
     }
 }
 
-unsafe impl<'a> EspEventSource for EspEvent<'a> {
+unsafe impl EspEventSource for EspEvent<'_> {
     fn source() -> Option<&'static ffi::CStr> {
         None
     }
 }
 
-impl<'a> EspEventDeserializer for EspEvent<'a> {
+impl EspEventDeserializer for EspEvent<'_> {
     type Data<'d> = EspEvent<'d>;
 
     fn deserialize<'d>(data: &EspEvent<'d>) -> Self::Data<'d> {
@@ -343,7 +343,7 @@ where
     _callback: Box<Box<dyn FnMut(EspEvent) + Send + 'a>>,
 }
 
-impl<'a, T> EspSubscription<'a, T>
+impl<T> EspSubscription<'_, T>
 where
     T: EspEventLoopType,
 {
@@ -369,9 +369,9 @@ where
     }
 }
 
-unsafe impl<'a, T> Send for EspSubscription<'a, T> where T: EspEventLoopType {}
+unsafe impl<T> Send for EspSubscription<'_, T> where T: EspEventLoopType {}
 
-impl<'a, T> Drop for EspSubscription<'a, T>
+impl<T> Drop for EspSubscription<'_, T>
 where
     T: EspEventLoopType,
 {
@@ -404,7 +404,7 @@ where
     }
 }
 
-impl<'a, T> RawHandle for EspSubscription<'a, User<T>>
+impl<T> RawHandle for EspSubscription<'_, User<T>>
 where
     T: EspEventLoopType,
 {
@@ -441,12 +441,16 @@ where
             self.given = false;
         }
 
-        if let Some(data) = self.receiver.get_shared_async().await {
+        while let Some(data) = self.receiver.get_shared_async().await {
+            if Some(data.source) != D::source() {
+                self.receiver.done();
+                continue;
+            }
             self.given = true;
-            Ok(D::deserialize(data))
-        } else {
-            Err(EspError::from_infallible::<ESP_ERR_INVALID_STATE>())
+            return Ok(D::deserialize(data));
         }
+
+        Err(EspError::from_infallible::<ESP_ERR_INVALID_STATE>())
     }
 }
 
@@ -573,7 +577,7 @@ where
         let sender = QuitOnDrop::new(channel);
 
         let subscription = self.subscribe::<EspEvent, _>(move |event| {
-            let mut event = unsafe { core::mem::transmute(event) };
+            let mut event = unsafe { mem::transmute::<EspEvent<'_>, EspEvent<'_>>(event) };
 
             sender.channel().share(&mut event);
         })?;
@@ -599,7 +603,7 @@ where
     /// This method - in contrast to method `subscribe` - allows the user to pass
     /// a non-static callback/closure. This enables users to borrow
     /// - in the closure - variables that live on the stack - or more generally - in the same
-    /// scope where the service is created.
+    ///   scope where the service is created.
     ///
     /// HOWEVER: care should be taken NOT to call `core::mem::forget()` on the service,
     /// as that would immediately lead to an UB (crash).
@@ -900,7 +904,7 @@ mod async_wait {
 
     use esp_idf_hal::task::asynch::Notification;
 
-    use log::debug;
+    use ::log::debug;
 
     use super::{EspEventDeserializer, EspEventLoop, EspEventLoopType, EspSubscription};
     use crate::sys::{esp, EspError, ESP_ERR_TIMEOUT};

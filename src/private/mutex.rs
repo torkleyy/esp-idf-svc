@@ -111,6 +111,11 @@ impl<T> Mutex<T> {
     pub fn lock(&self) -> MutexGuard<'_, T> {
         MutexGuard::new(self)
     }
+
+    #[inline(always)]
+    pub fn get_mut(&mut self) -> &mut T {
+        self.1.get_mut()
+    }
 }
 
 unsafe impl<T> Sync for Mutex<T> where T: Send {}
@@ -129,7 +134,7 @@ impl<'a, T> MutexGuard<'a, T> {
     }
 }
 
-impl<'a, T> Drop for MutexGuard<'a, T> {
+impl<T> Drop for MutexGuard<'_, T> {
     #[inline(always)]
     fn drop(&mut self) {
         unsafe {
@@ -138,7 +143,7 @@ impl<'a, T> Drop for MutexGuard<'a, T> {
     }
 }
 
-impl<'a, T> Deref for MutexGuard<'a, T> {
+impl<T> Deref for MutexGuard<'_, T> {
     type Target = T;
 
     #[inline(always)]
@@ -147,7 +152,7 @@ impl<'a, T> Deref for MutexGuard<'a, T> {
     }
 }
 
-impl<'a, T> DerefMut for MutexGuard<'a, T> {
+impl<T> DerefMut for MutexGuard<'_, T> {
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { self.0 .1.get().as_mut().unwrap() }

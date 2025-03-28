@@ -13,7 +13,10 @@ use crate::private::mutex;
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-#[cfg(not(any(esp_idf_version_major = "4", esp_idf_version_minor = "0")))]
+#[cfg(not(any(
+    esp_idf_version_major = "4",
+    all(esp_idf_version_major = "5", esp_idf_version_minor = "0"),
+)))] // For ESP-IDF v5.1 and later
 mod esp_sntp {
     use super::OperatingMode;
     pub use crate::sys::*;
@@ -45,7 +48,10 @@ mod esp_sntp {
     pub use esp_sntp_stop as sntp_stop;
 }
 
-#[cfg(any(esp_idf_version_major = "4", esp_idf_version_minor = "0"))]
+#[cfg(any(
+    esp_idf_version_major = "4",
+    all(esp_idf_version_major = "5", esp_idf_version_minor = "0"),
+))] // Up to ESP-IDF v5.0.x
 mod esp_sntp {
     use super::OperatingMode;
     pub use crate::sys::*;
@@ -141,7 +147,7 @@ pub struct SntpConf<'a> {
     pub sync_mode: SyncMode,
 }
 
-impl<'a> Default for SntpConf<'a> {
+impl Default for SntpConf<'_> {
     fn default() -> Self {
         let mut servers: [&str; SNTP_SERVER_NUM] = Default::default();
         let copy_len = min(servers.len(), DEFAULT_SERVERS.len());
@@ -201,7 +207,7 @@ impl<'a> EspSntp<'a> {
     /// This method - in contrast to method `new_with_callback` - allows the user to set
     /// a non-static callback/closure into the returned `EspSntp` service. This enables users to borrow
     /// - in the closure - variables that live on the stack - or more generally - in the same
-    /// scope where the service is created.
+    ///   scope where the service is created.
     ///
     /// HOWEVER: care should be taken NOT to call `core::mem::forget()` on the service,
     /// as that would immediately lead to an UB (crash).
@@ -308,7 +314,7 @@ impl<'a> EspSntp<'a> {
     }
 }
 
-impl<'a> Drop for EspSntp<'a> {
+impl Drop for EspSntp<'_> {
     fn drop(&mut self) {
         {
             let mut taken = TAKEN.lock();

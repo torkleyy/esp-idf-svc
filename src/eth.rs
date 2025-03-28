@@ -1,9 +1,7 @@
 use core::fmt::Debug;
 use core::marker::PhantomData;
 use core::time::Duration;
-use core::{ffi, ptr};
-
-use ::log::*;
+use core::{ffi, ops, ptr};
 
 extern crate alloc;
 use alloc::boxed::Box;
@@ -62,16 +60,13 @@ where
     GPIO17: Peripheral<P = gpio::Gpio17>,
 {
     Input(GPIO0),
-    #[cfg(not(esp_idf_version = "4.3"))]
     OutputGpio0(GPIO0),
-    /// This according to ESP-IDF is for "testing" only
-    #[cfg(not(esp_idf_version = "4.3"))]
+    /// This according to ESP-IDF is for "testing" only    
     OutputGpio16(GPIO16),
-    #[cfg(not(esp_idf_version = "4.3"))]
     OutputInvertedGpio17(GPIO17),
 }
 
-#[cfg(all(esp32, esp_idf_eth_use_esp32_emac, not(esp_idf_version = "4.3")))]
+#[cfg(all(esp32, esp_idf_eth_use_esp32_emac))]
 impl<GPIO0, GPIO16, GPIO17> RmiiClockConfig<GPIO0, GPIO16, GPIO17>
 where
     GPIO0: Peripheral<P = gpio::Gpio0>,
@@ -117,7 +112,125 @@ pub enum SpiEthChipset {
     KSZ8851SNL,
 }
 
-type RawCallback<'a> = Box<dyn FnMut(&[u8]) + Send + 'a>;
+/// Source/mechanism to use for getting notifications/events from the emac.
+///
+/// # Availability
+///
+/// Pre version `v5.1.4` of esp-idf, only an interrupt pin could be used as source:
+///
+/// - v4.4: <https://github.com/espressif/esp-idf/blob/e499576efdb086551abe309a72899302f82077b7/components/esp_eth/include/esp_eth_mac.h#L461-L464>
+/// - v5.0: <https://github.com/espressif/esp-idf/blob/bcca689866db3dfda47f77670bf8df2a7ec94721/components/esp_eth/include/esp_eth_mac.h#L513-L517>
+/// - v5.1.3: <https://github.com/espressif/esp-idf/blob/e7771c75bd1dbbfb7b3c5381be7e063b197c9734/components/esp_eth/include/esp_eth_mac.h#L612-L617>
+/// - V5.2.0: <https://github.com/espressif/esp-idf/blob/11eaf41b37267ad7709c0899c284e3683d2f0b5e/components/esp_eth/include/esp_eth_mac.h#L612-L617>
+///
+/// Starting with `v5.1.4`, `v5.2.1` and `>= v5.3` the option of `poll_period_ms` became available:
+/// - v5.1.4: <https://github.com/espressif/esp-idf/blob/d7b0a45ddbddbac53afb4fc28168f9f9259dbb79/components/esp_eth/include/esp_eth_mac.h#L614-L620>
+/// - v5.2.1: <https://github.com/espressif/esp-idf/blob/a322e6bdad4b6675d4597fb2722eea2851ba88cb/components/esp_eth/include/esp_eth_mac.h#L614-L620>
+/// - v5.3-dev: <https://github.com/espressif/esp-idf/blob/ea010f84ef878dda07146244e166930738c1c103/components/esp_eth/include/esp_eth_mac.h#L694-L700>
+#[cfg(any(
+    esp_idf_eth_spi_ethernet_dm9051,
+    esp_idf_eth_spi_ethernet_w5500,
+    esp_idf_eth_spi_ethernet_ksz8851snl
+))]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SpiEventSource<'d> {
+    #[cfg(not(any(
+        esp_idf_version_major = "4",
+        all(
+            esp_idf_version_major = "5",
+            any(
+                esp_idf_version_minor = "0",
+                all(esp_idf_version_minor = "1", esp_idf_version_patch = "0"),
+                all(esp_idf_version_minor = "1", esp_idf_version_patch = "1"),
+                all(esp_idf_version_minor = "1", esp_idf_version_patch = "2"),
+                all(esp_idf_version_minor = "1", esp_idf_version_patch = "3"),
+                all(esp_idf_version_minor = "2", esp_idf_version_patch = "0"),
+            )
+        ),
+    )))]
+    pub(crate) poll_interval_ms: u32,
+    pub(crate) interrupt_pin: i32,
+    _p: PhantomData<&'d mut ()>,
+}
+
+#[cfg(any(
+    esp_idf_eth_spi_ethernet_dm9051,
+    esp_idf_eth_spi_ethernet_w5500,
+    esp_idf_eth_spi_ethernet_ksz8851snl
+))]
+impl<'d> SpiEventSource<'d> {
+    /// Instead of getting informed by an interrupt pin about updates/changes from the emac, the
+    /// MCU polls the emac periodically for updates.
+    ///
+    /// In most cases, [`Self::polling`] should be used as it is more efficient.
+    /// But this source makes e.g. sense if the interrupt pin of the emac is not connected to the MCU.
+    #[cfg(not(any(
+        esp_idf_version_major = "4",
+        all(
+            esp_idf_version_major = "5",
+            any(
+                esp_idf_version_minor = "0",
+                all(esp_idf_version_minor = "1", esp_idf_version_patch = "0"),
+                all(esp_idf_version_minor = "1", esp_idf_version_patch = "1"),
+                all(esp_idf_version_minor = "1", esp_idf_version_patch = "2"),
+                all(esp_idf_version_minor = "1", esp_idf_version_patch = "3"),
+                all(esp_idf_version_minor = "2", esp_idf_version_patch = "0"),
+            )
+        ),
+    )))]
+    pub fn polling(interval: Duration) -> Result<Self, core::num::TryFromIntError> {
+        let poll_interval_ms = interval.as_millis().try_into()?;
+
+        Ok(Self {
+            #[cfg(not(any(
+                esp_idf_version_major = "4",
+                all(
+                    esp_idf_version_major = "5",
+                    any(
+                        esp_idf_version_minor = "0",
+                        all(esp_idf_version_minor = "1", esp_idf_version_patch = "0"),
+                        all(esp_idf_version_minor = "1", esp_idf_version_patch = "1"),
+                        all(esp_idf_version_minor = "1", esp_idf_version_patch = "2"),
+                        all(esp_idf_version_minor = "1", esp_idf_version_patch = "3"),
+                        all(esp_idf_version_minor = "2", esp_idf_version_patch = "0"),
+                    )
+                ),
+            )))]
+            poll_interval_ms,
+            interrupt_pin: -1,
+            _p: PhantomData,
+        })
+    }
+
+    /// Get status updates/changes from the emac by way of an interrupt pin.
+    ///
+    /// If the interrupt pin is not connected, see [`Self::polling`] for an alternative.
+    pub fn interrupt(pin: impl Peripheral<P = impl gpio::InputPin> + 'd) -> Self {
+        crate::hal::into_ref!(pin);
+
+        Self {
+            #[cfg(not(any(
+                esp_idf_version_major = "4",
+                all(
+                    esp_idf_version_major = "5",
+                    any(
+                        esp_idf_version_minor = "0",
+                        all(esp_idf_version_minor = "1", esp_idf_version_patch = "0"),
+                        all(esp_idf_version_minor = "1", esp_idf_version_patch = "1"),
+                        all(esp_idf_version_minor = "1", esp_idf_version_patch = "2"),
+                        all(esp_idf_version_minor = "1", esp_idf_version_patch = "3"),
+                        all(esp_idf_version_minor = "2", esp_idf_version_patch = "0"),
+                    )
+                ),
+            )))]
+            poll_interval_ms: 0,
+            interrupt_pin: pin.pin(),
+            _p: PhantomData,
+        }
+    }
+}
+
+type RawCallback<'a> = Box<dyn FnMut(EthFrame) + Send + 'a>;
 
 struct UnsafeCallback<'a>(*mut RawCallback<'a>);
 
@@ -135,7 +248,7 @@ impl<'a> UnsafeCallback<'a> {
         self.0.cast()
     }
 
-    unsafe fn call(&self, data: &[u8]) {
+    unsafe fn call(&self, data: EthFrame) {
         let reference = self.0.as_mut().unwrap();
 
         (reference)(data);
@@ -164,11 +277,21 @@ impl<T> Drop for SpiEth<T> {
         if let Some(device) = self.device {
             esp!(unsafe { spi_bus_remove_device(device) }).unwrap();
 
-            info!("SpiEth dropped");
+            ::log::info!("SpiEth dropped");
         }
     }
 }
 
+/// This struct provides a safe wrapper over the ESP IDF Ethernet C driver.
+///
+/// The driver works on Layer 2 (Data Link) in the OSI model, in that it provides
+/// facilities for sending and receiving ethernet packets over the built-in
+/// RMII interface of `esp32` and/or via a dedicated SPI ethernet peripheral for all
+/// other MCUs.
+///
+/// For most use cases, utilizing `EspEth` - which provides a networking (IP)
+/// layer as well - should be preferred. Using `EthDriver` directly is beneficial
+/// only when one would like to utilize a custom, non-STD network stack like `smoltcp`.
 pub struct EthDriver<'d, T> {
     _flavor: T,
     handle: esp_eth_handle_t,
@@ -265,13 +388,7 @@ impl<'d> EthDriver<'d, RmiiEth> {
         let phy = match chipset {
             RmiiEthChipset::IP101 => unsafe { esp_eth_phy_new_ip101(&phy_cfg) },
             RmiiEthChipset::RTL8201 => unsafe { esp_eth_phy_new_rtl8201(&phy_cfg) },
-            #[cfg(not(esp_idf_version = "4.3"))]
             RmiiEthChipset::LAN87XX => unsafe { esp_eth_phy_new_lan87xx(&phy_cfg) },
-            #[cfg(esp_idf_version = "4.3")]
-            #[deprecated(
-                note = "Using ESP-IDF 4.3 is untested, please upgrade to 4.4 or newer. Support will be removed in the next major release."
-            )]
-            RmiiEthChipset::LAN87XX => unsafe { esp_eth_phy_new_lan8720(&phy_cfg) },
             RmiiEthChipset::DP83848 => unsafe { esp_eth_phy_new_dp83848(&phy_cfg) },
             #[cfg(esp_idf_version_major = "4")]
             RmiiEthChipset::KSZ8041 => unsafe { esp_eth_phy_new_ksz8041(&phy_cfg) },
@@ -297,10 +414,7 @@ impl<'d> EthDriver<'d, RmiiEth> {
         let mac = {
             let mut config = Self::eth_mac_default_config(mdc, mdio);
 
-            #[cfg(not(esp_idf_version = "4.3"))]
-            {
-                config.clock_config = clk_config.eth_mac_clock_config();
-            }
+            config.clock_config = clk_config.eth_mac_clock_config();
 
             unsafe { esp_eth_mac_new_esp32(&config) }
         };
@@ -318,11 +432,49 @@ impl<'d> EthDriver<'d, RmiiEth> {
         mac
     }
 
-    #[cfg(not(esp_idf_version_major = "4"))]
+    #[cfg(any(
+        esp_idf_version = "5.0",
+        esp_idf_version = "5.1",
+        esp_idf_version = "5.2"
+    ))]
     fn eth_esp32_emac_default_config(mdc: i32, mdio: i32) -> eth_esp32_emac_config_t {
         eth_esp32_emac_config_t {
             smi_mdc_gpio_num: mdc,
             smi_mdio_gpio_num: mdio,
+            interface: eth_data_interface_t_EMAC_DATA_INTERFACE_RMII,
+            ..Default::default()
+        }
+    }
+
+    #[cfg(esp_idf_version = "5.3")]
+    fn eth_esp32_emac_default_config(mdc: i32, mdio: i32) -> eth_esp32_emac_config_t {
+        eth_esp32_emac_config_t {
+            __bindgen_anon_1: eth_esp32_emac_config_t__bindgen_ty_1 {
+                __bindgen_anon_1: eth_esp32_emac_config_t__bindgen_ty_1__bindgen_ty_1 {
+                    smi_mdc_gpio_num: mdc,
+                    smi_mdio_gpio_num: mdio,
+                },
+            },
+            interface: eth_data_interface_t_EMAC_DATA_INTERFACE_RMII,
+            ..Default::default()
+        }
+    }
+
+    #[cfg(not(any(
+        esp_idf_version_major = "4",
+        esp_idf_version = "5.0",
+        esp_idf_version = "5.1",
+        esp_idf_version = "5.2",
+        esp_idf_version = "5.3"
+    )))]
+    fn eth_esp32_emac_default_config(mdc: i32, mdio: i32) -> eth_esp32_emac_config_t {
+        eth_esp32_emac_config_t {
+            __bindgen_anon_1: eth_esp32_emac_config_t__bindgen_ty_1 {
+                smi_gpio: emac_esp_smi_gpio_config_t {
+                    mdc_num: mdc,
+                    mdio_num: mdio,
+                },
+            },
             interface: eth_data_interface_t_EMAC_DATA_INTERFACE_RMII,
             ..Default::default()
         }
@@ -392,13 +544,51 @@ where
         phy_addr: Option<u32>,
         sysloop: EspSystemEventLoop,
     ) -> Result<Self, EspError> {
-        crate::hal::into_ref!(int);
+        Self::new_spi_with_event_source(
+            driver,
+            SpiEventSource::interrupt(int),
+            cs,
+            rst,
+            chipset,
+            baudrate,
+            mac_addr,
+            phy_addr,
+            sysloop,
+        )
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_spi_with_event_source(
+        driver: T,
+        event_source: SpiEventSource<'d>,
+        cs: Option<impl Peripheral<P = impl gpio::OutputPin> + 'd>,
+        rst: Option<impl Peripheral<P = impl gpio::OutputPin> + 'd>,
+        chipset: SpiEthChipset,
+        baudrate: Hertz,
+        mac_addr: Option<&[u8; 6]>,
+        phy_addr: Option<u32>,
+        sysloop: EspSystemEventLoop,
+    ) -> Result<Self, EspError> {
         let (mac, phy, device) = Self::init_spi(
             driver.borrow().host(),
             chipset,
             baudrate,
-            int.pin(),
+            event_source.interrupt_pin,
+            #[cfg(not(any(
+                esp_idf_version_major = "4",
+                all(
+                    esp_idf_version_major = "5",
+                    any(
+                        esp_idf_version_minor = "0",
+                        all(esp_idf_version_minor = "1", esp_idf_version_patch = "0"),
+                        all(esp_idf_version_minor = "1", esp_idf_version_patch = "1"),
+                        all(esp_idf_version_minor = "1", esp_idf_version_patch = "2"),
+                        all(esp_idf_version_minor = "1", esp_idf_version_patch = "3"),
+                        all(esp_idf_version_minor = "2", esp_idf_version_patch = "0"),
+                    )
+                ),
+            )))]
+            event_source.poll_interval_ms,
             cs.map(|pin| pin.into_ref().pin()),
             rst.map(|pin| pin.into_ref().pin()),
             phy_addr,
@@ -418,12 +608,27 @@ where
         Ok(eth)
     }
 
-    #[allow(clippy::unnecessary_literal_unwrap)]
+    #[allow(clippy::unnecessary_literal_unwrap, clippy::too_many_arguments)]
     fn init_spi(
         host: spi_host_device_t,
         chipset: SpiEthChipset,
         baudrate: Hertz,
-        int: i32,
+        int_gpio_num: i32,
+        #[cfg(not(any(
+            esp_idf_version_major = "4",
+            all(
+                esp_idf_version_major = "5",
+                any(
+                    esp_idf_version_minor = "0",
+                    all(esp_idf_version_minor = "1", esp_idf_version_patch = "0"),
+                    all(esp_idf_version_minor = "1", esp_idf_version_patch = "1"),
+                    all(esp_idf_version_minor = "1", esp_idf_version_patch = "2"),
+                    all(esp_idf_version_minor = "1", esp_idf_version_patch = "3"),
+                    all(esp_idf_version_minor = "2", esp_idf_version_patch = "0"),
+                )
+            ),
+        )))]
+        poll_period_ms: u32,
         cs: Option<i32>,
         rst: Option<i32>,
         phy_addr: Option<u32>,
@@ -454,14 +659,30 @@ where
                 #[cfg(esp_idf_version_major = "4")]
                 let dm9051_cfg = eth_dm9051_config_t {
                     spi_hdl: spi_handle.unwrap() as *mut _,
-                    int_gpio_num: int,
+                    int_gpio_num,
                 };
 
                 #[cfg(not(esp_idf_version_major = "4"))]
+                #[allow(clippy::needless_update)]
                 let dm9051_cfg = eth_dm9051_config_t {
                     spi_host_id: host,
                     spi_devcfg: &spi_devcfg as *const _ as *mut _,
-                    int_gpio_num: int,
+                    int_gpio_num,
+                    #[cfg(not(any(
+                        esp_idf_version_major = "4",
+                        all(
+                            esp_idf_version_major = "5",
+                            any(
+                                esp_idf_version_minor = "0",
+                                all(esp_idf_version_minor = "1", esp_idf_version_patch = "0"),
+                                all(esp_idf_version_minor = "1", esp_idf_version_patch = "1"),
+                                all(esp_idf_version_minor = "1", esp_idf_version_patch = "2"),
+                                all(esp_idf_version_minor = "1", esp_idf_version_patch = "3"),
+                                all(esp_idf_version_minor = "2", esp_idf_version_patch = "0"),
+                            )
+                        ),
+                    )))]
+                    poll_period_ms,
                     #[cfg(not(any(
                         esp_idf_version_major = "4",
                         all(
@@ -470,6 +691,7 @@ where
                         ),
                     )))]
                     custom_spi_driver: eth_spi_custom_driver_config_t::default(),
+                    ..Default::default()
                 };
 
                 let mac = unsafe { esp_eth_mac_new_dm9051(&dm9051_cfg, &mac_cfg) };
@@ -490,14 +712,30 @@ where
                 #[cfg(esp_idf_version_major = "4")]
                 let w5500_cfg = eth_w5500_config_t {
                     spi_hdl: spi_handle.unwrap() as *mut _,
-                    int_gpio_num: int,
+                    int_gpio_num,
                 };
 
                 #[cfg(not(esp_idf_version_major = "4"))]
+                #[allow(clippy::needless_update)]
                 let w5500_cfg = eth_w5500_config_t {
                     spi_host_id: host,
                     spi_devcfg: &spi_devcfg as *const _ as *mut _,
-                    int_gpio_num: int,
+                    int_gpio_num,
+                    #[cfg(not(any(
+                        esp_idf_version_major = "4",
+                        all(
+                            esp_idf_version_major = "5",
+                            any(
+                                esp_idf_version_minor = "0",
+                                all(esp_idf_version_minor = "1", esp_idf_version_patch = "0"),
+                                all(esp_idf_version_minor = "1", esp_idf_version_patch = "1"),
+                                all(esp_idf_version_minor = "1", esp_idf_version_patch = "2"),
+                                all(esp_idf_version_minor = "1", esp_idf_version_patch = "3"),
+                                all(esp_idf_version_minor = "2", esp_idf_version_patch = "0"),
+                            )
+                        ),
+                    )))]
+                    poll_period_ms,
                     #[cfg(not(any(
                         esp_idf_version_major = "4",
                         all(
@@ -506,6 +744,7 @@ where
                         ),
                     )))]
                     custom_spi_driver: eth_spi_custom_driver_config_t::default(),
+                    ..Default::default()
                 };
 
                 let mac = unsafe { esp_eth_mac_new_w5500(&w5500_cfg, &mac_cfg) };
@@ -526,14 +765,30 @@ where
                 #[cfg(esp_idf_version_major = "4")]
                 let ksz8851snl_cfg = eth_ksz8851snl_config_t {
                     spi_hdl: spi_handle.unwrap() as *mut _,
-                    int_gpio_num: int,
+                    int_gpio_num,
                 };
 
                 #[cfg(not(esp_idf_version_major = "4"))]
+                #[allow(clippy::needless_update)]
                 let ksz8851snl_cfg = eth_ksz8851snl_config_t {
                     spi_host_id: host,
                     spi_devcfg: &spi_devcfg as *const _ as *mut _,
-                    int_gpio_num: int,
+                    int_gpio_num,
+                    #[cfg(not(any(
+                        esp_idf_version_major = "4",
+                        all(
+                            esp_idf_version_major = "5",
+                            any(
+                                esp_idf_version_minor = "0",
+                                all(esp_idf_version_minor = "1", esp_idf_version_patch = "0"),
+                                all(esp_idf_version_minor = "1", esp_idf_version_patch = "1"),
+                                all(esp_idf_version_minor = "1", esp_idf_version_patch = "2"),
+                                all(esp_idf_version_minor = "1", esp_idf_version_patch = "3"),
+                                all(esp_idf_version_minor = "2", esp_idf_version_patch = "0"),
+                            )
+                        ),
+                    )))]
+                    poll_period_ms,
                     #[cfg(not(any(
                         esp_idf_version_major = "4",
                         all(
@@ -542,6 +797,7 @@ where
                         ),
                     )))]
                     custom_spi_driver: eth_spi_custom_driver_config_t::default(),
+                    ..Default::default()
                 };
 
                 let mac = unsafe { esp_eth_mac_new_ksz8851snl(&ksz8851snl_cfg, &mac_cfg) };
@@ -597,7 +853,7 @@ impl<'d, T> EthDriver<'d, T> {
         let mut handle: esp_eth_handle_t = ptr::null_mut();
         esp!(unsafe { esp_eth_driver_install(&cfg, &mut handle) })?;
 
-        info!("Driver initialized");
+        ::log::info!("Driver initialized");
 
         if let Some(mac_addr) = mac_addr {
             esp!(unsafe {
@@ -608,7 +864,7 @@ impl<'d, T> EthDriver<'d, T> {
                 )
             })?;
 
-            info!("Attached MAC address: {:?}", mac_addr);
+            ::log::info!("Attached MAC address: {:?}", mac_addr);
         }
 
         let (waitable, subscription) = Self::subscribe(handle, &sysloop)?;
@@ -622,7 +878,7 @@ impl<'d, T> EthDriver<'d, T> {
             _p: PhantomData,
         };
 
-        info!("Initialization complete");
+        ::log::info!("Initialization complete");
 
         Ok(eth)
     }
@@ -669,27 +925,27 @@ impl<'d, T> EthDriver<'d, T> {
     pub fn start(&mut self) -> Result<(), EspError> {
         esp!(unsafe { esp_eth_start(self.handle) })?;
 
-        info!("Start requested");
+        ::log::info!("Start requested");
 
         Ok(())
     }
 
     pub fn stop(&mut self) -> Result<(), EspError> {
-        info!("Stopping");
+        ::log::info!("Stopping");
 
         let err = unsafe { esp_eth_stop(self.handle) };
         if err != ESP_ERR_INVALID_STATE {
             esp!(err)?;
         }
 
-        info!("Stop requested");
+        ::log::info!("Stop requested");
 
         Ok(())
     }
 
     pub fn set_rx_callback<F>(&mut self, callback: F) -> Result<(), EspError>
     where
-        F: FnMut(&[u8]) + Send + 'static,
+        F: FnMut(EthFrame) + Send + 'static,
     {
         self.internal_set_rx_callback(callback)
     }
@@ -699,7 +955,7 @@ impl<'d, T> EthDriver<'d, T> {
     /// This method - in contrast to method `set_rx_callback` - allows the user to pass
     /// a non-static callback/closure. This enables users to borrow
     /// - in the closure - variables that live on the stack - or more generally - in the same
-    /// scope where the service is created.
+    ///   scope where the service is created.
     ///
     /// HOWEVER: care should be taken NOT to call `core::mem::forget()` on the service,
     /// as that would immediately lead to an UB (crash).
@@ -719,24 +975,24 @@ impl<'d, T> EthDriver<'d, T> {
     /// are introduced to Rust (i.e. the impossibility to "forget" a type and thus not call its destructor).
     pub unsafe fn set_nonstatic_rx_callback<F>(&mut self, callback: F) -> Result<(), EspError>
     where
-        F: FnMut(&[u8]) + Send + 'd,
+        F: FnMut(EthFrame) + Send + 'd,
     {
         self.internal_set_rx_callback(callback)
     }
 
-    fn internal_set_rx_callback<F>(&mut self, mut callback: F) -> Result<(), EspError>
+    fn internal_set_rx_callback<F>(&mut self, callback: F) -> Result<(), EspError>
     where
-        F: FnMut(&[u8]) + Send + 'd,
+        F: FnMut(EthFrame) + Send + 'd,
     {
         let _ = self.stop();
 
-        let mut callback: Box<RawCallback> = Box::new(Box::new(move |data| callback(data)));
+        let mut callback: Box<RawCallback> = Box::new(Box::new(callback));
 
         let unsafe_callback = UnsafeCallback::from(&mut callback);
 
-        unsafe {
-            esp_eth_update_input_path(self.handle(), Some(Self::handle), unsafe_callback.as_ptr());
-        }
+        esp!(unsafe {
+            esp_eth_update_input_path(self.handle(), Some(Self::handle), unsafe_callback.as_ptr())
+        })?;
 
         self.callback = Some(callback);
 
@@ -757,8 +1013,7 @@ impl<'d, T> EthDriver<'d, T> {
         len: u32,
         event_handler_arg: *mut ffi::c_void,
     ) -> esp_err_t {
-        UnsafeCallback::from_ptr(event_handler_arg as *mut _)
-            .call(core::slice::from_raw_parts(buf, len as _));
+        UnsafeCallback::from_ptr(event_handler_arg as *mut _).call(EthFrame::new(buf, len));
 
         ESP_OK
     }
@@ -770,7 +1025,30 @@ impl<'d, T> EthDriver<'d, T> {
             esp!(esp_eth_driver_uninstall(self.handle))?;
         }
 
-        info!("Driver deinitialized");
+        ::log::info!("Driver deinitialized");
+
+        Ok(())
+    }
+
+    /// Enables or disables promiscuous mode for the [`EthDriver`].
+    ///
+    /// When promiscuous mode is enabled, the driver captures all Ethernet frames
+    /// on the network, regardless of their destination MAC address. This is useful for
+    /// debugging or monitoring purposes.
+    pub fn set_promiscuous(&mut self, state: bool) -> Result<(), EspError> {
+        esp!(unsafe {
+            esp_eth_ioctl(
+                self.handle(),
+                esp_eth_io_cmd_t_ETH_CMD_S_PROMISCUOUS,
+                &raw const state as *mut _,
+            )
+        })?;
+
+        if state {
+            ::log::info!("Driver set in promiscuous mode");
+        } else {
+            ::log::info!("Driver set in non-promiscuous mode");
+        }
 
         Ok(())
     }
@@ -784,12 +1062,14 @@ impl<'d, T> EthDriver<'d, T> {
         }
     }
 
+    #[allow(clippy::needless_update)]
     fn eth_phy_default_config(reset_pin: Option<i32>, phy_addr: Option<u32>) -> eth_phy_config_t {
         eth_phy_config_t {
             phy_addr: phy_addr.map(|a| a as i32).unwrap_or(ESP_ETH_PHY_ADDR_AUTO),
             reset_timeout_ms: 100,
             autonego_timeout_ms: 4000,
             reset_gpio_num: reset_pin.unwrap_or(-1),
+            ..Default::default()
         }
     }
 
@@ -812,14 +1092,14 @@ impl<'d, T> EthDriver<'d, T> {
     fn eth_mac_default_config(_mdc: i32, _mdio: i32) -> eth_mac_config_t {
         eth_mac_config_t {
             sw_reset_timeout_ms: 100,
-            rx_task_stack_size: 2048,
+            rx_task_stack_size: 4096,
             rx_task_prio: 15,
             flags: 0,
         }
     }
 }
 
-impl<'d, T> Eth for EthDriver<'d, T> {
+impl<T> Eth for EthDriver<'_, T> {
     type Error = EspError;
 
     fn start(&mut self) -> Result<(), Self::Error> {
@@ -839,17 +1119,17 @@ impl<'d, T> Eth for EthDriver<'d, T> {
     }
 }
 
-unsafe impl<'d, T> Send for EthDriver<'d, T> {}
+unsafe impl<T> Send for EthDriver<'_, T> {}
 
-impl<'d, T> Drop for EthDriver<'d, T> {
+impl<T> Drop for EthDriver<'_, T> {
     fn drop(&mut self) {
         self.clear_all().unwrap();
 
-        info!("EthDriver dropped");
+        ::log::info!("EthDriver dropped");
     }
 }
 
-impl<'d, T> RawHandle for EthDriver<'d, T> {
+impl<T> RawHandle for EthDriver<'_, T> {
     type Handle = esp_eth_handle_t;
 
     fn handle(&self) -> Self::Handle {
@@ -857,6 +1137,58 @@ impl<'d, T> RawHandle for EthDriver<'d, T> {
     }
 }
 
+pub struct EthFrame {
+    buf: *mut u8,
+    len: u32,
+}
+
+unsafe impl Send for EthFrame {}
+
+impl EthFrame {
+    const unsafe fn new(buf: *mut u8, len: u32) -> Self {
+        Self { buf, len }
+    }
+
+    pub const fn as_slice(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.buf, self.len as _) }
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        unsafe { core::slice::from_raw_parts_mut(self.buf, self.len as _) }
+    }
+}
+
+impl ops::Deref for EthFrame {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.buf, self.len as _) }
+    }
+}
+
+impl ops::DerefMut for EthFrame {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        unsafe { core::slice::from_raw_parts_mut(self.buf, self.len as _) }
+    }
+}
+
+impl Drop for EthFrame {
+    fn drop(&mut self) {
+        unsafe { free(self.buf.cast()) };
+    }
+}
+
+/// `EspEth` wraps an `EthDriver` Data Link layer instance, and binds the OSI
+/// Layer 3 (network) facilities of ESP IDF to it.
+///
+/// In other words, it connects the ESP IDF ethernet Netif interface to the
+/// ethernet driver. This allows users to utilize the Rust STD APIs for working with
+/// TCP and UDP sockets.
+///
+/// This struct should be the default option for an ethernet driver in all use cases
+/// but the niche one where bypassing the ESP IDF Netif and lwIP stacks is
+/// desirable. E.g., using `smoltcp` or other custom IP stacks on top of the
+/// ESP IDF ethernet peripheral.
 #[cfg(esp_idf_comp_esp_netif_enabled)]
 pub struct EspEth<'d, T> {
     glue_handle: *mut esp_eth_netif_glue_t,
@@ -952,19 +1284,19 @@ impl<'d, T> EspEth<'d, T> {
 }
 
 #[cfg(esp_idf_comp_esp_netif_enabled)]
-impl<'d, T> Drop for EspEth<'d, T> {
+impl<T> Drop for EspEth<'_, T> {
     fn drop(&mut self) {
         self.detach_netif().unwrap();
 
-        info!("EspEth dropped");
+        ::log::info!("EspEth dropped");
     }
 }
 
 #[cfg(esp_idf_comp_esp_netif_enabled)]
-unsafe impl<'d, T> Send for EspEth<'d, T> {}
+unsafe impl<T> Send for EspEth<'_, T> {}
 
 #[cfg(esp_idf_comp_esp_netif_enabled)]
-impl<'d, T> RawHandle for EspEth<'d, T> {
+impl<T> RawHandle for EspEth<'_, T> {
     type Handle = *mut esp_eth_netif_glue_t;
 
     fn handle(&self) -> Self::Handle {
@@ -973,7 +1305,7 @@ impl<'d, T> RawHandle for EspEth<'d, T> {
 }
 
 #[cfg(esp_idf_comp_esp_netif_enabled)]
-impl<'d, T> Eth for EspEth<'d, T> {
+impl<T> Eth for EspEth<'_, T> {
     type Error = EspError;
 
     fn start(&mut self) -> Result<(), Self::Error> {
@@ -994,7 +1326,7 @@ impl<'d, T> Eth for EspEth<'d, T> {
 }
 
 #[cfg(esp_idf_comp_esp_netif_enabled)]
-impl<'d, T> NetifStatus for EspEth<'d, T> {
+impl<T> NetifStatus for EspEth<'_, T> {
     fn is_up(&self) -> Result<bool, EspError> {
         EspEth::is_up(self)
     }
@@ -1323,7 +1655,7 @@ where
 }
 
 #[cfg(esp_idf_comp_esp_netif_enabled)]
-impl<'d, T> crate::netif::asynch::NetifStatus for EspEth<'d, T> {
+impl<T> crate::netif::asynch::NetifStatus for EspEth<'_, T> {
     async fn is_up(&self) -> Result<bool, EspError> {
         EspEth::is_up(self)
     }

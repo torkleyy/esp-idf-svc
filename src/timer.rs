@@ -55,7 +55,7 @@ pub struct EspTimer<'a> {
     _callback: Box<dyn FnMut() + Send + 'a>,
 }
 
-impl<'a> EspTimer<'a> {
+impl EspTimer<'_> {
     pub fn is_scheduled(&self) -> Result<bool, EspError> {
         Ok(unsafe { esp_timer_is_active(self.handle) })
     }
@@ -109,9 +109,9 @@ impl<'a> EspTimer<'a> {
     }
 }
 
-unsafe impl<'a> Send for EspTimer<'a> {}
+unsafe impl Send for EspTimer<'_> {}
 
-impl<'a> Drop for EspTimer<'a> {
+impl Drop for EspTimer<'_> {
     fn drop(&mut self) {
         self.cancel().unwrap();
 
@@ -123,7 +123,7 @@ impl<'a> Drop for EspTimer<'a> {
     }
 }
 
-impl<'a> RawHandle for EspTimer<'a> {
+impl RawHandle for EspTimer<'_> {
     type Handle = esp_timer_handle_t;
 
     fn handle(&self) -> Self::Handle {
@@ -207,26 +207,24 @@ where
     where
         F: FnMut() + Send + 'static,
     {
-        self.internal_timer(callback)
+        self.internal_timer(callback, false)
+    }
+
+    /// Same as `timer` but does not wake the device from light sleep.
+    pub fn timer_nowake<F>(&self, callback: F) -> Result<EspTimer<'static>, EspError>
+    where
+        F: FnMut() + Send + 'static,
+    {
+        self.internal_timer(callback, true)
     }
 
     pub fn timer_async(&self) -> Result<EspAsyncTimer, EspError> {
-        let notification = Arc::new(Notification::new());
+        self.internal_timer_async(false)
+    }
 
-        let timer = {
-            let notification = Arc::downgrade(&notification);
-
-            self.timer(move || {
-                if let Some(notification) = notification.upgrade() {
-                    notification.notify(NonZeroU32::new(1).unwrap());
-                }
-            })?
-        };
-
-        Ok(EspAsyncTimer {
-            timer,
-            notification,
-        })
+    /// Same as `timer_async` but does not wake the device from light sleep.
+    pub fn timer_async_nowake(&self) -> Result<EspAsyncTimer, EspError> {
+        self.internal_timer_async(true)
     }
 
     /// # Safety
@@ -234,7 +232,7 @@ where
     /// This method - in contrast to method `timer` - allows the user to pass
     /// a non-static callback/closure. This enables users to borrow
     /// - in the closure - variables that live on the stack - or more generally - in the same
-    /// scope where the service is created.
+    ///   scope where the service is created.
     ///
     /// HOWEVER: care should be taken NOT to call `core::mem::forget()` on the service,
     /// as that would immediately lead to an UB (crash).
@@ -256,10 +254,27 @@ where
     where
         F: FnMut() + Send + 'a,
     {
-        self.internal_timer(callback)
+        self.internal_timer(callback, false)
     }
 
-    fn internal_timer<'a, F>(&self, callback: F) -> Result<EspTimer<'a>, EspError>
+    /// # Safety
+    ///
+    /// Same as `timer_nonstatic` but does not wake the device from light sleep.
+    pub unsafe fn timer_nonstatic_nowake<'a, F>(
+        &self,
+        callback: F,
+    ) -> Result<EspTimer<'a>, EspError>
+    where
+        F: FnMut() + Send + 'a,
+    {
+        self.internal_timer(callback, true)
+    }
+
+    fn internal_timer<'a, F>(
+        &self,
+        callback: F,
+        skip_unhandled_events: bool,
+    ) -> Result<EspTimer<'a>, EspError>
     where
         F: FnMut() + Send + 'a,
     {
@@ -287,7 +302,7 @@ where
                     name: b"rust\0" as *const _ as *const _, // TODO
                     arg: unsafe_callback.as_ptr(),
                     dispatch_method,
-                    skip_unhandled_events: false, // TODO
+                    skip_unhandled_events,
                 },
                 &mut handle as *mut _,
             )
@@ -296,6 +311,28 @@ where
         Ok(EspTimer {
             handle,
             _callback: callback,
+        })
+    }
+
+    fn internal_timer_async(&self, skip_unhandled_events: bool) -> Result<EspAsyncTimer, EspError> {
+        let notification = Arc::new(Notification::new());
+
+        let timer = {
+            let notification = Arc::downgrade(&notification);
+
+            self.internal_timer(
+                move || {
+                    if let Some(notification) = notification.upgrade() {
+                        notification.notify(NonZeroU32::new(1).unwrap());
+                    }
+                },
+                skip_unhandled_events,
+            )?
+        };
+
+        Ok(EspAsyncTimer {
+            timer,
+            notification,
         })
     }
 }
@@ -341,134 +378,132 @@ mod isr {
     }
 }
 
+/// This module is used to provide a time driver for the `embassy-time` crate.
+///
+/// The minimum provided resolution is ~ 20-30us when the CPU is at top speed of 240MHz
+/// (https://docs.espressif.com/projects/esp-idf/en/v5.4/esp32/api-reference/system/esp_timer.html#timeout-value-limits)
+///
+/// The tick-rate is 1MHz (i.e. 1 tick is 1us).
 #[cfg(feature = "embassy-time-driver")]
 pub mod embassy_time_driver {
-    use core::cell::UnsafeCell;
+    use core::cell::RefCell;
+    use core::task::Waker;
 
-    use heapless::Vec;
+    use ::embassy_time_driver::Driver;
+    use embassy_time_queue_utils::Queue;
 
-    use ::embassy_time_driver::{AlarmHandle, Driver};
-
-    use crate::hal::task::CriticalSection;
-
-    use crate::sys::*;
-
+    use crate::private::mutex::Mutex;
     use crate::timer::*;
 
-    struct Alarm {
+    struct EspDriverInner {
+        queue: embassy_time_queue_utils::Queue,
         timer: Option<EspTimer<'static>>,
-        #[allow(clippy::type_complexity)]
-        callback: Option<(fn(*mut ()), *mut ())>,
     }
 
-    struct EspDriver<const MAX_ALARMS: usize = 16> {
-        alarms: UnsafeCell<Vec<Alarm, MAX_ALARMS>>,
-        cs: CriticalSection,
-    }
-
-    impl<const MAX_ALARMS: usize> EspDriver<MAX_ALARMS> {
-        const fn new() -> Self {
-            Self {
-                alarms: UnsafeCell::new(Vec::new()),
-                cs: CriticalSection::new(),
-            }
-        }
-
-        fn call(&self, id: u8) {
-            let callback = {
-                let _guard = self.cs.enter();
-
-                let alarm = self.alarm(id);
-
-                alarm.callback
-            };
-
-            if let Some((func, arg)) = callback {
-                func(arg)
-            }
-        }
-
-        #[allow(clippy::mut_from_ref)]
-        fn alarm(&self, id: u8) -> &mut Alarm {
-            &mut unsafe { self.alarms.get().as_mut() }.unwrap()[id as usize]
-        }
-    }
-
-    unsafe impl<const MAX_ALARMS: usize> Send for EspDriver<MAX_ALARMS> {}
-    unsafe impl<const MAX_ALARMS: usize> Sync for EspDriver<MAX_ALARMS> {}
-
-    impl<const MAX_ALARMS: usize> Driver for EspDriver<MAX_ALARMS> {
-        fn now(&self) -> u64 {
+    impl EspDriverInner {
+        fn now() -> u64 {
             unsafe { esp_timer_get_time() as _ }
         }
 
-        unsafe fn allocate_alarm(&self) -> Option<AlarmHandle> {
-            let id = {
-                let _guard = self.cs.enter();
+        fn schedule_next_expiration(&mut self) {
+            /// End of epoch minus one day
+            const MAX_SAFE_TIMEOUT_US: u64 = u64::MAX - 24 * 60 * 60 * 1000 * 1000;
 
-                let id = self.alarms.get().as_mut().unwrap().len();
+            let timer = self.timer.as_mut().unwrap();
 
-                if id < MAX_ALARMS {
-                    self.alarms
-                        .get()
-                        .as_mut()
-                        .unwrap()
-                        .push(Alarm {
-                            timer: None,
-                            callback: None,
-                        })
-                        .unwrap_or_else(|_| unreachable!());
+            loop {
+                let now = Self::now();
+                let next_at = self.queue.next_expiration(now);
 
-                    id as u8
-                } else {
-                    return None;
+                if now < next_at {
+                    let after = next_at - now;
+
+                    if after <= MAX_SAFE_TIMEOUT_US {
+                        // Why?
+                        // The ESP-IDF Timer API does not have a `Timer::at` method so we have to call it with
+                        // `Timer::after(next_at - now)` instead. The problem is - even though the ESP IDF
+                        // Timer API does not have a `Timer::at` method - _internally_ it takes our `next_at - now`,
+                        // adds to it a **newer** "now" and sets this as the moment in time when the timer should trigger.
+                        //
+                        // Consider what would happen if we call `Timer::after(u64::MAX - now)`:
+                        // The result would be something like `u64::MAX - now + (now + 1)` which would silently overflow and
+                        // trigger the timer after 1us:
+                        // https://github.com/espressif/esp-idf/blob/b5ac4fbdf9e9fb320bb0a98ee4fbaa18f8566f37/components/esp_timer/src/esp_timer.c#L188
+                        //
+                        // To workaround this problem, we make sure to never call `Timer::after(ms)` with `ms` greater than `MAX_SAFE_TIMEOUT_US`
+                        // (i.e. the end of epoch - one day).
+                        //
+                        // Thus, even if we are un-scheduled between the calculation of our own `now` and the driver's newer `now`,
+                        // there is one extra **day** of millis to accomodate for the potential overflow. If the overflow does happen still
+                        // (which is kinda unthinkable given the time scales we are working with), the timer will re-trigger immediately,
+                        // but hopefully on the next (or next after next and so on) re-trigger, we won't have the overflow anymore.
+                        timer.after(Duration::from_micros(after)).unwrap();
+                    }
+
+                    break;
                 }
-            };
-
-            let service = EspTimerService::<Task>::new().unwrap();
-
-            // Driver is always statically allocated, so this is safe
-            let static_self: &'static Self = core::mem::transmute(self);
-
-            self.alarm(id).timer = Some(service.timer(move || static_self.call(id)).unwrap());
-
-            Some(AlarmHandle::new(id))
-        }
-
-        fn set_alarm_callback(&self, handle: AlarmHandle, callback: fn(*mut ()), ctx: *mut ()) {
-            let _guard = self.cs.enter();
-
-            let alarm = self.alarm(handle.id());
-
-            alarm.callback = Some((callback, ctx));
-        }
-
-        fn set_alarm(&self, handle: AlarmHandle, timestamp: u64) -> bool {
-            let alarm = self.alarm(handle.id());
-
-            let now = self.now();
-
-            if now < timestamp {
-                alarm
-                    .timer
-                    .as_mut()
-                    .unwrap()
-                    .after(Duration::from_micros(timestamp - now))
-                    .unwrap();
-                true
-            } else {
-                false
             }
         }
     }
 
-    pub type LinkWorkaround = [*mut (); 4];
+    struct EspDriver {
+        inner: Mutex<RefCell<EspDriverInner>>,
+    }
 
+    impl EspDriver {
+        const fn new() -> Self {
+            Self {
+                inner: Mutex::new(RefCell::new(EspDriverInner {
+                    queue: Queue::new(),
+                    timer: None,
+                })),
+            }
+        }
+    }
+
+    unsafe impl Send for EspDriver {}
+    unsafe impl Sync for EspDriver {}
+
+    impl Driver for EspDriver {
+        fn now(&self) -> u64 {
+            EspDriverInner::now()
+        }
+
+        fn schedule_wake(&self, at: u64, waker: &Waker) {
+            let service = EspTimerService::<Task>::new().unwrap();
+
+            let guard = self.inner.lock();
+            let mut inner = guard.borrow_mut();
+
+            if inner.timer.is_none() {
+                // Driver is always statically allocated, so this is safe
+                let static_self: &'static Self = unsafe { core::mem::transmute(self) };
+
+                inner.timer = Some(
+                    service
+                        .timer(move || {
+                            static_self
+                                .inner
+                                .lock()
+                                .borrow_mut()
+                                .schedule_next_expiration()
+                        })
+                        .unwrap(),
+                );
+            }
+
+            if inner.queue.schedule_wake(at, waker) {
+                inner.schedule_next_expiration();
+            }
+        }
+    }
+
+    pub type LinkWorkaround = [*mut (); 2];
+
+    #[used]
     static mut __INTERNAL_REFERENCE: LinkWorkaround = [
         _embassy_time_now as *mut _,
-        _embassy_time_allocate_alarm as *mut _,
-        _embassy_time_set_alarm_callback as *mut _,
-        _embassy_time_set_alarm as *mut _,
+        _embassy_time_schedule_wake as *mut _,
     ];
 
     pub fn link() -> LinkWorkaround {
