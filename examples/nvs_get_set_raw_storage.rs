@@ -32,33 +32,35 @@ fn main() -> anyhow::Result<()> {
     let test_namespace = "test_ns";
     let nvs = match EspNvs::new(nvs_default_partition, test_namespace, true) {
         Ok(nvs) => {
-            info!("Got namespace {:?} from default partition", test_namespace);
+            info!("Got namespace {test_namespace:?} from default partition");
             nvs
         }
-        Err(e) => panic!("Could't get namespace {:?}", e),
+        Err(e) => panic!("Could't get namespace {e:?}"),
     };
+
+    let storage = EspKeyValueStorage::new(nvs);
 
     let key_raw_u8 = "test_raw_u8";
     {
         let key_raw_u8_data: &[u8] = &[42];
 
-        match nvs.set_raw(key_raw_u8, key_raw_u8_data) {
+        match storage.set_raw(key_raw_u8, key_raw_u8_data) {
             Ok(_) => info!("Key updated"),
             // You can find the meaning of the error codes in the output of the error branch in:
             // https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/error-codes.html
-            Err(e) => info!("Key not updated {:?}", e),
+            Err(e) => info!("Key not updated {e:?}"),
         };
     }
 
     {
         let key_raw_u8_data: &mut [u8] = &mut [u8::MAX];
 
-        match nvs.get_raw(key_raw_u8, key_raw_u8_data) {
+        match storage.get_raw(key_raw_u8, key_raw_u8_data) {
             Ok(v) => match v {
-                Some(vv) => info!("{:?} = {:?}", key_raw_u8, vv),
+                Some(vv) => info!("{key_raw_u8:?} = {vv:?}"),
                 None => todo!(),
             },
-            Err(e) => info!("Couldn't get key {} because{:?}", key_raw_u8, e),
+            Err(e) => info!("Couldn't get key {key_raw_u8} because{e:?}"),
         };
     }
 
@@ -66,25 +68,25 @@ fn main() -> anyhow::Result<()> {
     {
         let key_raw_str_data = "Hello from the NVS (I'm raw)!";
 
-        match nvs.set_raw(
+        match storage.set_raw(
             key_raw_str,
             &to_vec::<&str, 100>(&key_raw_str_data).unwrap(),
         ) {
-            Ok(_) => info!("Key {} updated", key_raw_str),
-            Err(e) => info!("Key {} not updated {:?}", key_raw_str, e),
+            Ok(_) => info!("Key {key_raw_str} updated"),
+            Err(e) => info!("Key {key_raw_str} not updated {e:?}"),
         };
     }
 
     {
         let key_raw_str_data: &mut [u8] = &mut [0; 100];
 
-        match nvs.get_raw(key_raw_str, key_raw_str_data) {
+        match storage.get_raw(key_raw_str, key_raw_str_data) {
             Ok(v) => {
                 if let Some(the_str) = v {
-                    info!("{:?} = {:?}", key_raw_str, from_bytes::<&str>(the_str));
+                    info!("{key_raw_str:?} = {:?}", from_bytes::<&str>(the_str));
                 }
             }
-            Err(e) => info!("Couldn't get key {} because {:?}", key_raw_str, e),
+            Err(e) => info!("Couldn't get key {key_raw_str} because {e:?}"),
         };
     }
 
@@ -96,19 +98,19 @@ fn main() -> anyhow::Result<()> {
             a_number: 42,
         };
 
-        match nvs.set_raw(
+        match storage.set_raw(
             key_raw_struct,
             &to_vec::<StructToBeStored, 100>(&key_raw_struct_data).unwrap(),
         ) {
-            Ok(_) => info!("Key {} updated", key_raw_struct),
-            Err(e) => info!("key {} not updated {:?}", key_raw_struct, e),
+            Ok(_) => info!("Key {key_raw_struct} updated"),
+            Err(e) => info!("key {key_raw_struct} not updated {e:?}"),
         };
     }
 
     {
         let key_raw_struct_data: &mut [u8] = &mut [0; 100];
 
-        match nvs.get_raw(key_raw_struct, key_raw_struct_data) {
+        match storage.get_raw(key_raw_struct, key_raw_struct_data) {
             Ok(v) => {
                 if let Some(the_struct) = v {
                     info!(
@@ -118,7 +120,7 @@ fn main() -> anyhow::Result<()> {
                     )
                 }
             }
-            Err(e) => info!("Couldn't get key {} because {:?}", key_raw_struct, e),
+            Err(e) => info!("Couldn't get key {key_raw_struct} because {e:?}"),
         };
     }
 

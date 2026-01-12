@@ -10,7 +10,7 @@ use embedded_svc::{
     wifi::{self, AccessPointConfiguration, AuthMethod},
 };
 
-use esp_idf_svc::hal::prelude::Peripherals;
+use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::{
     eventloop::EspSystemEventLoop,
     http::server::EspHttpServer,
@@ -134,10 +134,7 @@ fn connect_wifi(wifi: &mut BlockingWifi<EspWifi<'static>>) -> anyhow::Result<()>
     wifi.wait_netif_up()?;
     info!("Wifi netif up");
 
-    info!(
-        "Created Wi-Fi with WIFI_SSID `{}` and WIFI_PASS `{}`",
-        SSID, PASSWORD
-    );
+    info!("Created Wi-Fi with WIFI_SSID `{SSID}` and WIFI_PASS `{PASSWORD}`");
 
     Ok(())
 }

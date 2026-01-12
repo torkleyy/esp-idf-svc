@@ -184,7 +184,13 @@ impl<'a> TryFrom<&'a MqttClientConfiguration<'a>>
 
         if let Some(lwt) = conf.lwt.as_ref() {
             c_conf.lwt_topic = cstrs.as_ptr(lwt.topic)?;
-            c_conf.lwt_msg = lwt.payload.as_ptr() as _;
+            c_conf.lwt_msg = if lwt.payload.is_empty() {
+                // ... or else len = 0 will cause ESP-IDF to treat our pointer as
+                // if it points to a C string, which it definitely doesn't
+                core::ptr::null()
+            } else {
+                lwt.payload.as_ptr() as _
+            };
             c_conf.lwt_msg_len = lwt.payload.len() as _;
             c_conf.lwt_qos = lwt.qos as _;
             c_conf.lwt_retain = lwt.retain as _;
@@ -1074,7 +1080,7 @@ impl<'a> EspMqttEvent<'a> {
                 },
             },
             esp_mqtt_event_id_t_MQTT_EVENT_DELETED => EventPayload::Deleted(self.0.msg_id as _),
-            other => panic!("Unknown message type: {}", other),
+            other => panic!("Unknown message type: {other}"),
         }
     }
 }

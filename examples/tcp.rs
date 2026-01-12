@@ -35,8 +35,7 @@ fn tcp_client() -> Result<(), io::Error> {
     let err = stream.try_clone();
     if let Err(err) = err {
         info!(
-            "Duplication of file descriptors does not work (yet) on the ESP-IDF, as expected: {}",
-            err
+            "Duplication of file descriptors does not work (yet) on the ESP-IDF, as expected: {err}"
         );
     }
 
@@ -69,7 +68,7 @@ fn tcp_server() -> Result<(), io::Error> {
                     });
                 }
                 Err(e) => {
-                    error!("Error: {}", e);
+                    error!("Error: {e}");
                 }
             }
         }
@@ -103,7 +102,7 @@ fn tcp_server() -> Result<(), io::Error> {
 
 fn wifi_create() -> Result<esp_idf_svc::wifi::EspWifi<'static>, EspError> {
     use esp_idf_svc::eventloop::*;
-    use esp_idf_svc::hal::prelude::Peripherals;
+    use esp_idf_svc::hal::peripherals::Peripherals;
     use esp_idf_svc::nvs::*;
     use esp_idf_svc::wifi::*;
 

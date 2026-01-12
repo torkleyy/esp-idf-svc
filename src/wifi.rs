@@ -13,7 +13,6 @@ use enumset::*;
 use embedded_svc::wifi::Wifi;
 
 use crate::hal::modem::WifiModemPeripheral;
-use crate::hal::peripheral::Peripheral;
 
 use crate::sys::*;
 
@@ -112,7 +111,7 @@ pub mod config {
                     },
                 },
                 channel: s.channel.unwrap_or_default(),
-                scan_type: matches!(s.scan_type, ScanType::Active { .. }).into(),
+                scan_type: matches!(s.scan_type, ScanType::Passive { .. }).into(),
                 show_hidden: s.show_hidden,
                 ..Default::default()
             }
@@ -470,8 +469,8 @@ struct WifiDriverStatus {
 
 impl<'d> WifiDriver<'d> {
     #[cfg(all(feature = "alloc", esp_idf_comp_nvs_flash_enabled))]
-    pub fn new<M: WifiModemPeripheral>(
-        _modem: impl Peripheral<P = M> + 'd,
+    pub fn new<M: WifiModemPeripheral + 'd>(
+        _modem: M,
         sysloop: EspSystemEventLoop,
         nvs: Option<EspDefaultNvsPartition>,
     ) -> Result<Self, EspError> {
@@ -488,8 +487,8 @@ impl<'d> WifiDriver<'d> {
     }
 
     #[cfg(not(all(feature = "alloc", esp_idf_comp_nvs_flash_enabled)))]
-    pub fn new<M: WifiModemPeripheral>(
-        _modem: impl Peripheral<P = M> + 'd,
+    pub fn new<M: WifiModemPeripheral + 'd>(
+        _modem: M,
         sysloop: EspSystemEventLoop,
     ) -> Result<Self, EspError> {
         Self::init(false)?;
@@ -641,7 +640,7 @@ impl<'d> WifiDriver<'d> {
     pub fn get_capabilities(&self) -> Result<EnumSet<Capability>, EspError> {
         let caps = Capability::Client | Capability::AccessPoint | Capability::Mixed;
 
-        ::log::debug!("Providing capabilities: {:?}", caps);
+        ::log::debug!("Providing capabilities: {caps:?}");
 
         Ok(caps)
     }
@@ -789,7 +788,7 @@ impl<'d> WifiDriver<'d> {
     /// Calls [`crate::sys::esp_wifi_set_mode`](crate::sys::esp_wifi_set_mode)
     /// and [`crate::sys::esp_wifi_set_config`](crate::sys::esp_wifi_set_config)
     pub fn set_configuration(&mut self, conf: &Configuration) -> Result<(), EspError> {
-        ::log::debug!("Setting configuration: {:?}", conf);
+        ::log::debug!("Setting configuration: {conf:?}");
 
         match conf {
             Configuration::None => {
@@ -953,7 +952,7 @@ impl<'d> WifiDriver<'d> {
                 Newtype(ap_info_raw).try_into()
             })
             .filter_map(|r| r.ok())
-            .inspect(|ap_info| ::log::debug!("Found access point {:?}", ap_info))
+            .inspect(|ap_info| ::log::debug!("Found access point {ap_info:?}"))
             .collect();
 
         Ok((result, scanned_count))
@@ -985,7 +984,7 @@ impl<'d> WifiDriver<'d> {
                 Newtype(ap_info_raw).try_into()
             })
             .filter_map(|r| r.ok())
-            .inspect(|ap_info| ::log::debug!("Found access point {:?}", ap_info))
+            .inspect(|ap_info| ::log::debug!("Found access point {ap_info:?}"))
             .collect();
 
         Ok(result)
@@ -1102,15 +1101,15 @@ impl<'d> WifiDriver<'d> {
         })
     }
 
-    /// Get information of AP which the ESP32 station is associated with.
+    /// Get information about the AP with which the station is associated.
     /// Useful to get the current signal strength of the AP.
-    pub fn get_ap_info(&mut self) -> Result<AccessPointInfo, EspError> {
+    pub fn get_ap_info(&self) -> Result<AccessPointInfo, EspError> {
         let mut ap_info_raw: wifi_ap_record_t = wifi_ap_record_t::default();
-        // If Sta not connected throws EspError(12303)
+        // If STA is not connected EspError(12303) is returned
         esp!(unsafe { esp_wifi_sta_get_ap_info(&mut ap_info_raw) })?;
         let ap_info: AccessPointInfo = Newtype(&ap_info_raw).try_into().unwrap();
 
-        ::log::debug!("AP Info: {:?}", ap_info);
+        ::log::debug!("AP Info: {ap_info:?}");
         Ok(ap_info)
     }
 
@@ -1252,7 +1251,7 @@ impl<'d> WifiDriver<'d> {
         let current_config = self.get_sta_conf()?;
 
         if current_config != *conf {
-            ::log::debug!("Setting STA configuration: {:?}", conf);
+            ::log::debug!("Setting STA configuration: {conf:?}");
 
             let mut wifi_config = wifi_config_t {
                 sta: Newtype::<wifi_sta_config_t>::try_from(conf)?.0,
@@ -1284,7 +1283,7 @@ impl<'d> WifiDriver<'d> {
         let current_config = self.get_ap_conf()?;
 
         if current_config != *conf {
-            ::log::debug!("Setting AP configuration: {:?}", conf);
+            ::log::debug!("Setting AP configuration: {conf:?}");
 
             let mut wifi_config = wifi_config_t {
                 ap: Newtype::<wifi_ap_config_t>::try_from(conf)?.0,
@@ -1323,7 +1322,7 @@ impl<'d> WifiDriver<'d> {
         let mut found_ap: u16 = 0;
         esp!(unsafe { esp_wifi_scan_get_ap_num(&mut found_ap as *mut _) })?;
 
-        ::log::debug!("Found {} access points", found_ap);
+        ::log::debug!("Found {found_ap} access points");
 
         Ok(found_ap as usize)
     }
@@ -1338,7 +1337,7 @@ impl<'d> WifiDriver<'d> {
 
         esp!(unsafe { esp_wifi_scan_get_ap_records(&mut ap_count, ap_infos_raw.as_mut_ptr(),) })?;
 
-        ::log::debug!("Got info for {} access points", ap_count);
+        ::log::debug!("Got info for {ap_count} access points");
 
         Ok(ap_count as usize)
     }
@@ -1558,8 +1557,8 @@ pub struct EspWifi<'d> {
 #[cfg(esp_idf_comp_esp_netif_enabled)]
 impl<'d> EspWifi<'d> {
     #[cfg(all(feature = "alloc", esp_idf_comp_nvs_flash_enabled))]
-    pub fn new<M: WifiModemPeripheral>(
-        modem: impl Peripheral<P = M> + 'd,
+    pub fn new<M: WifiModemPeripheral + 'd>(
+        modem: M,
         sysloop: EspSystemEventLoop,
         nvs: Option<EspDefaultNvsPartition>,
     ) -> Result<Self, EspError> {
@@ -1567,8 +1566,8 @@ impl<'d> EspWifi<'d> {
     }
 
     #[cfg(not(all(feature = "alloc", esp_idf_comp_nvs_flash_enabled)))]
-    pub fn new<M: WifiModemPeripheral>(
-        modem: impl Peripheral<P = M> + 'd,
+    pub fn new<M: WifiModemPeripheral + 'd>(
+        modem: M,
         sysloop: EspSystemEventLoop,
     ) -> Result<Self, EspError> {
         Self::wrap(WifiDriver::new(modem, sysloop)?)
@@ -1841,6 +1840,12 @@ impl<'d> EspWifi<'d> {
 
     pub fn get_rssi(&self) -> Result<i32, EspError> {
         self.driver().get_rssi()
+    }
+
+    /// Get information about the AP with which the station is associated.
+    /// Useful to get the current signal strength of the AP.
+    pub fn get_ap_info(&self) -> Result<AccessPointInfo, EspError> {
+        self.driver().get_ap_info()
     }
 }
 
@@ -2381,7 +2386,7 @@ impl EspEventDeserializer for WifiEvent<'_> {
                     new_snd: payload.new_snd.try_into().ok(),
                 })
             }
-            _ => panic!("unknown event ID: {}", event_id),
+            _ => panic!("unknown event ID: {event_id}"),
         }
     }
 }

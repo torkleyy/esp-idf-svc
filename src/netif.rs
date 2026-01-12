@@ -468,8 +468,13 @@ impl EspNetif {
         Ok(netif)
     }
 
+    pub fn is_netif_up(&self) -> Result<bool, EspError> {
+        Ok(unsafe { esp_netif_is_netif_up(self.handle) })
+    }
+
+    // TODO: Copy and rename to `is_up_ipv4` and deprecate the `is_up` variant in future
     pub fn is_up(&self) -> Result<bool, EspError> {
-        if !unsafe { esp_netif_is_netif_up(self.handle) } {
+        if !self.is_netif_up()? {
             Ok(false)
         } else {
             let mut ip_info = Default::default();
@@ -850,7 +855,7 @@ impl EspEventDeserializer for IpEvent<'_> {
 
             IpEvent::DhcpIpDeassigned(netif_handle_mut as *mut _)
         } else {
-            panic!("Unknown event ID: {}", event_id);
+            panic!("Unknown event ID: {event_id}");
         }
     }
 }
@@ -1284,7 +1289,7 @@ mod driver {
                 ..Default::default()
             };
 
-            debug!("Post attach ifconfig: {:?}", driver_ifconfig);
+            debug!("Post attach ifconfig: {driver_ifconfig:?}");
 
             // d->base.netif = esp_netif; TODO: This is weird; the netif in base is already set on constructor?
 
@@ -1441,7 +1446,7 @@ mod ppp {
                     PppEvent::PhaseDisconnect
                 }
                 esp_netif_ppp_status_event_t_NETIF_PPP_CONNECT_FAILED => PppEvent::PhaseFailed,
-                _ => panic!("Unknown event ID: {}", event_id),
+                _ => panic!("Unknown event ID: {event_id}"),
             }
         }
     }

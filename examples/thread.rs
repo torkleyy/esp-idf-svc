@@ -31,7 +31,7 @@ mod example {
     use log::info;
 
     use esp_idf_svc::eventloop::EspSystemSubscription;
-    use esp_idf_svc::hal::prelude::Peripherals;
+    use esp_idf_svc::hal::peripherals::Peripherals;
     use esp_idf_svc::io::vfs::MountedEventfs;
     use esp_idf_svc::thread::{EspThread, ThreadEvent};
     use esp_idf_svc::{eventloop::EspSystemEventLoop, nvs::EspDefaultNvsPartition};
@@ -50,20 +50,21 @@ mod example {
         let mut thread =
             EspThread::new(peripherals.modem, sys_loop.clone(), nvs, mounted_event_fs)?;
 
-        thread.init()?;
-
         info!("Thread initialized, now running...");
 
-        thread.run()?;
+        thread.start()?;
 
-        Ok(())
+        loop {
+            // Keep the main thread alive to allow the Thread Border Router to run
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
     }
 
     fn log_thread_sysloop(
         sys_loop: EspSystemEventLoop,
     ) -> Result<EspSystemSubscription<'static>, anyhow::Error> {
         let subscription = sys_loop.subscribe::<ThreadEvent, _>(|event| {
-            info!("Got: {:?}", event);
+            info!("Got: {event:?}");
         })?;
 
         Ok(subscription)

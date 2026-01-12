@@ -1,7 +1,6 @@
 //! Example of a BLE GATT server using the ESP IDF Bluedroid BLE bindings.
-//! Build with `--features experimental` (for now).
 //!
-//! You can test it with any "GATT Browser" app, like e.g.
+//! You can test it with the bt_gatt_client example or any "GATT Browser" app, like e.g.
 //! the "GATTBrowser" mobile app available on Android.
 //!
 //! The example server publishes a single service featuring two characteristics:
@@ -12,7 +11,7 @@
 //! but also how to broadcast data to all clients that have subscribed to a characteristic, including
 //! handling indication confirmations.
 //!
-//! Note that the Buedroid stack consumes a lot of memory, so `sdkconfig.defaults` should be carefully configured
+//! Note that the Bluedroid stack consumes a lot of memory, so `sdkconfig.defaults` should be carefully configured
 //! to avoid running out of memory.
 //!
 //! Here's a working configuration, but you might need to adjust further to your concrete use-case:
@@ -31,21 +30,17 @@
 #![allow(unknown_lints)]
 #![allow(unexpected_cfgs)]
 
-#[cfg(all(not(esp32s2), feature = "experimental"))]
+#[cfg(not(esp32s2))]
 fn main() -> anyhow::Result<()> {
     example::main()
 }
 
-#[cfg(any(esp32s2, not(feature = "experimental")))]
+#[cfg(esp32s2)]
 fn main() -> anyhow::Result<()> {
-    #[cfg(esp32s2)]
     panic!("ESP32-S2 does not have a BLE radio");
-
-    #[cfg(not(feature = "experimental"))]
-    panic!("Use `--features experimental` when building this example");
 }
 
-#[cfg(all(not(esp32s2), feature = "experimental"))]
+#[cfg(not(esp32s2))]
 mod example {
     use std::sync::{Arc, Condvar, Mutex};
 
@@ -205,13 +200,15 @@ mod example {
                     if state.ind_confirmed.is_none() {
                         let conn = &state.connections[peer_index];
 
-                        self.gatts
-                            .indicate(gatt_if, conn.conn_id, ind_handle, data)?;
+                        if conn.subscribed {
+                            self.gatts
+                                .indicate(gatt_if, conn.conn_id, ind_handle, data)?;
 
-                        state.ind_confirmed = Some(conn.peer);
-                        let conn = &state.connections[peer_index];
+                            state.ind_confirmed = Some(conn.peer);
+                            let conn = &state.connections[peer_index];
 
-                        info!("Indicated data to {}", conn.peer);
+                            info!("Indicated data to {}", conn.peer);
+                        }
                         break;
                     } else {
                         state = self.condvar.wait(state).unwrap();
@@ -356,12 +353,8 @@ mod example {
             Ok(())
         }
 
-        /// Create the service and start advertising
-        /// Called from within the event callback once we are notified that the GATTS app is registered
-        fn create_service(&self, gatt_if: GattInterface) -> Result<(), EspError> {
-            self.state.lock().unwrap().gatt_if = Some(gatt_if);
-
-            self.gap.set_device_name("ESP32")?;
+        /// Set the advertising configuration, effectively starting advertising
+        fn set_adv_conf(&self) -> Result<(), EspError> {
             self.gap.set_adv_conf(&AdvConfiguration {
                 include_name: true,
                 include_txpower: true,
@@ -370,7 +363,16 @@ mod example {
                 // service_data: todo!(),
                 // manufacturer_data: todo!(),
                 ..Default::default()
-            })?;
+            })
+        }
+
+        /// Create the service and start advertising
+        /// Called from within the event callback once we are notified that the GATTS app is registered
+        fn create_service(&self, gatt_if: GattInterface) -> Result<(), EspError> {
+            self.state.lock().unwrap().gatt_if = Some(gatt_if);
+
+            self.gap.set_device_name("ESP32")?;
+            self.set_adv_conf()?;
             self.gatts.create_service(
                 gatt_if,
                 &GattServiceId {
@@ -547,6 +549,9 @@ mod example {
                         .map_err(|_| ())
                         .unwrap();
 
+                    // restart advertising so we can get a new connection
+                    self.set_adv_conf()?;
+
                     true
                 } else {
                     false
@@ -571,6 +576,9 @@ mod example {
                 .position(|Connection { peer, .. }| *peer == addr)
             {
                 state.connections.swap_remove(index);
+
+                // restart advertising so we can get a new connection
+                self.set_adv_conf()?;
             }
 
             Ok(())
@@ -695,13 +703,13 @@ mod example {
 
         fn check_esp_status(&self, status: Result<(), EspError>) {
             if let Err(e) = status {
-                warn!("Got status: {:?}", e);
+                warn!("Got status: {e:?}");
             }
         }
 
         fn check_bt_status(&self, status: BtStatus) -> Result<(), EspError> {
             if !matches!(status, BtStatus::Success) {
-                warn!("Got status: {:?}", status);
+                warn!("Got status: {status:?}");
                 Err(EspError::from_infallible::<ESP_FAIL>())
             } else {
                 Ok(())
@@ -710,7 +718,7 @@ mod example {
 
         fn check_gatt_status(&self, status: GattStatus) -> Result<(), EspError> {
             if !matches!(status, GattStatus::Ok) {
-                warn!("Got status: {:?}", status);
+                warn!("Got status: {status:?}");
                 Err(EspError::from_infallible::<ESP_FAIL>())
             } else {
                 Ok(())

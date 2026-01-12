@@ -54,25 +54,19 @@ impl From<Method> for Newtype<(esp_http_client_method_t, ())> {
                 Method::Subscribe => esp_http_client_method_t_HTTP_METHOD_SUBSCRIBE,
                 Method::Unsubscribe => esp_http_client_method_t_HTTP_METHOD_UNSUBSCRIBE,
                 Method::Patch => esp_http_client_method_t_HTTP_METHOD_PATCH,
-                method => panic!("Method {:?} is not supported", method),
+                method => panic!("Method {method:?} is not supported"),
             },
             (),
         ))
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "std", derive(Hash))]
+#[derive(Default, Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum FollowRedirectsPolicy {
     FollowNone,
+    #[default]
     FollowGetHead,
     FollowAll,
-}
-
-impl Default for FollowRedirectsPolicy {
-    fn default() -> Self {
-        Self::FollowGetHead
-    }
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -82,6 +76,7 @@ pub struct Configuration {
     pub timeout: Option<core::time::Duration>,
     pub follow_redirects_policy: FollowRedirectsPolicy,
     pub client_certificate: Option<X509<'static>>,
+    pub server_certificate: Option<X509<'static>>,
     pub private_key: Option<X509<'static>>,
     pub use_global_ca_store: bool,
     pub crt_bundle_attach: Option<unsafe extern "C" fn(conf: *mut core::ffi::c_void) -> esp_err_t>,
@@ -138,10 +133,31 @@ impl EspHttpConnection {
             native_config.timeout_ms = timeout.as_millis() as _;
         }
 
+        if let Some(cert) = configuration.server_certificate {
+            #[cfg(esp_idf_version_at_least_5_5_0)]
+            {
+                native_config.__bindgen_anon_1.cert_pem = cert.as_esp_idf_raw_ptr() as _;
+            }
+            #[cfg(not(esp_idf_version_at_least_5_5_0))]
+            {
+                native_config.cert_pem = cert.as_esp_idf_raw_ptr() as _;
+            }
+            native_config.cert_len = cert.as_esp_idf_raw_len();
+        }
+
         if let (Some(cert), Some(private_key)) =
             (configuration.client_certificate, configuration.private_key)
         {
-            native_config.client_cert_pem = cert.as_esp_idf_raw_ptr() as _;
+            #[cfg(esp_idf_version_at_least_5_5_0)]
+            {
+                native_config.__bindgen_anon_2.client_cert_pem = cert.as_esp_idf_raw_ptr() as _;
+            }
+
+            #[cfg(not(esp_idf_version_at_least_5_5_0))]
+            {
+                native_config.client_cert_pem = cert.as_esp_idf_raw_ptr() as _;
+            }
+
             native_config.client_cert_len = cert.as_esp_idf_raw_len();
 
             native_config.client_key_pem = private_key.as_esp_idf_raw_ptr() as _;
@@ -445,7 +461,7 @@ impl EspHttpConnection {
                 let status = unsafe { esp_http_client_get_status_code(self.raw_client) as u16 };
 
                 if status::REDIRECT.contains(&status) && status != 304 {
-                    info!("Got response {}, about to follow redirect", status);
+                    info!("Got response {status}, about to follow redirect");
 
                     let mut len = 0_i32;
                     esp!(unsafe { esp_http_client_flush_response(self.raw_client, &mut len) })?;
