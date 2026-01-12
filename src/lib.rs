@@ -29,12 +29,7 @@ extern crate std;
 extern crate alloc;
 
 #[cfg(not(esp32s2))]
-#[cfg(all(
-    esp_idf_bt_enabled,
-    esp_idf_bt_bluedroid_enabled,
-    feature = "alloc",
-    feature = "experimental"
-))]
+#[cfg(all(esp_idf_bt_enabled, esp_idf_bt_bluedroid_enabled, feature = "alloc",))]
 pub mod bt;
 #[cfg(all(
     not(esp32h2),
@@ -60,7 +55,6 @@ pub mod espnow;
 pub mod eth;
 #[cfg(all(feature = "alloc", esp_idf_comp_esp_event_enabled))]
 pub mod eventloop;
-#[cfg(feature = "experimental")]
 pub mod fs;
 pub mod hal;
 pub mod handle;
@@ -92,10 +86,7 @@ pub mod nvs;
     any(esp_idf_comp_spi_flash_enabled, esp_idf_comp_esp_partition_enabled)
 ))]
 pub mod ota;
-#[cfg(all(
-    feature = "experimental",
-    any(esp_idf_comp_spi_flash_enabled, esp_idf_comp_esp_partition_enabled)
-))]
+#[cfg(any(esp_idf_comp_spi_flash_enabled, esp_idf_comp_esp_partition_enabled))]
 pub mod partition;
 #[cfg(esp_idf_comp_esp_netif_enabled)]
 pub mod ping;
@@ -105,7 +96,6 @@ pub mod sys;
 pub mod systime;
 #[cfg(all(
     feature = "alloc",
-    feature = "experimental",
     esp_idf_comp_openthread_enabled,
     esp_idf_openthread_enabled,
     esp_idf_comp_esp_event_enabled,
@@ -117,7 +107,7 @@ pub mod thread;
 pub mod timer;
 pub mod tls;
 #[cfg(all(
-    not(esp32h2),
+    not(any(esp32h2, esp32p4)),
     feature = "alloc",
     esp_idf_comp_esp_wifi_enabled,
     esp_idf_comp_esp_event_enabled,

@@ -16,11 +16,12 @@ use core::{borrow::Borrow, marker::PhantomData};
 
 use enumset::{EnumSet, EnumSetType};
 
-use crate::sys::*;
-
-use ::log::debug;
+use ::log::trace;
 
 use num_enum::TryFromPrimitive;
+
+use crate::private::cstr::to_cstring_arg;
+use crate::sys::*;
 
 use super::{BdAddr, BtClassicEnabled, BtDriver, BtSingleton, BtStatus, BtUuid};
 
@@ -368,7 +369,7 @@ pub struct PropData<'a> {
 
 #[allow(non_upper_case_globals)]
 impl PropData<'_> {
-    pub fn prop(&self) -> DeviceProp {
+    pub fn prop(&self) -> DeviceProp<'_> {
         unsafe {
             match self.data.type_ {
                 esp_bt_gap_dev_prop_type_t_ESP_BT_GAP_DEV_PROP_BDNAME => {
@@ -679,6 +680,22 @@ where
         Ok(())
     }
 
+    pub fn set_device_name(&self, device_name: &str) -> Result<(), EspError> {
+        let device_name = to_cstring_arg(device_name)?;
+
+        #[cfg(esp_idf_version_at_least_6_0_0)]
+        {
+            esp!(unsafe { esp_bt_gap_set_device_name(device_name.as_ptr()) })?;
+        }
+
+        #[cfg(not(esp_idf_version_at_least_6_0_0))]
+        {
+            esp!(unsafe { esp_bt_dev_set_device_name(device_name.as_ptr()) })?;
+        }
+
+        Ok(())
+    }
+
     pub fn set_scan_mode(
         &self,
         connectable: bool,
@@ -816,7 +833,7 @@ where
         let param = unsafe { param.as_ref() }.unwrap();
         let event = GapEvent::from((event, param));
 
-        debug!("Got event {{ {:#?} }}", event);
+        trace!("Got event {{ {event:#?} }}");
 
         SINGLETON.call(event);
     }

@@ -13,7 +13,11 @@ readme = "README.md"
 links = "esp_idf_svc"
 build = "build.rs"
 documentation = "https://docs.esp-rs.org/esp-idf-svc/"
-rust-version = "1.77"
+rust-version = "1.82"
+
+[patch.crates-io]
+esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys" }
+esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal" }
 
 [lib]
 harness = false
@@ -40,6 +44,9 @@ panic_handler = ["esp-idf-hal/panic_handler"]
 binstart = ["esp-idf-hal/binstart"]
 libstart = ["esp-idf-hal/libstart"]
 
+# Propagated form embeded-svc
+use_serde = ["embedded-svc/use_serde"]
+
 [dependencies]
 heapless = { version = "0.8", default-features = false }
 num_enum = { version = "0.7", default-features = false }
@@ -49,9 +56,9 @@ uncased = { version = "0.9.7", default-features = false }
 embedded-hal-async = { version = "1", default-features = false }
 embedded-svc = { version = "0.28", default-features = false }
 esp-idf-hal = { version = "0.45", default-features = false }
-embassy-time-driver = { version = "0.2", optional = true, features = ["tick-hz-1_000_000"] }
-embassy-time-queue-utils = { version = "0.1", optional = true }
-embassy-futures = "0.1"
+embassy-time-driver = { version = "0.2.1", optional = true, features = ["tick-hz-1_000_000"] }
+embassy-time-queue-utils = { version = "0.3", optional = true }
+embassy-futures = "0.1.2"
 embedded-storage = { version = "0.3", optional = true }
 futures-io = { version = "0.3", optional = true }
 

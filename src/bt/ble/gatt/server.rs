@@ -2,7 +2,7 @@ use core::borrow::Borrow;
 use core::fmt::{self, Debug};
 use core::marker::PhantomData;
 
-use ::log::{debug, trace};
+use ::log::trace;
 
 use crate::bt::{BdAddr, BleEnabled, BtDriver, BtSingleton, BtUuid};
 use crate::sys::*;
@@ -269,7 +269,7 @@ impl<'a> From<(esp_gatts_cb_event_t, &'a esp_ble_gatts_cb_param_t)> for GattsEve
                     conn_id: param.exec_write.conn_id,
                     addr: param.exec_write.bda.into(),
                     trans_id: param.exec_write.trans_id,
-                    canceled: param.exec_write.exec_write_flag == ESP_GATT_PREP_WRITE_CANCEL as _,
+                    canceled: param.exec_write.exec_write_flag == ESP_GATT_PREP_WRITE_CANCEL as u8,
                 }
             },
             esp_gatts_cb_event_t_ESP_GATTS_MTU_EVT => unsafe {
@@ -561,7 +561,7 @@ where
         esp!(unsafe {
             esp_ble_gatts_add_char(
                 service_handle,
-                &characteristic.uuid.raw() as *const _ as *mut _,
+                characteristic.uuid.raw() as *const _ as *mut _,
                 characteristic.permissions.as_repr(),
                 characteristic.properties.as_repr(),
                 &value as *const esp_attr_value_t as *mut _,
@@ -578,7 +578,7 @@ where
         esp!(unsafe {
             esp_ble_gatts_add_char_descr(
                 service_handle,
-                &descriptor.uuid.raw() as *const _ as *mut _,
+                descriptor.uuid.raw() as *const _ as *mut _,
                 descriptor.permissions.as_repr(),
                 core::ptr::null_mut(),
                 core::ptr::null_mut(),
@@ -598,7 +598,7 @@ where
             ))?;
 
             let data = core::slice::from_raw_parts(data, len as _);
-            trace!("len: {:?}, data: {:p}", len, data);
+            trace!("len: {len:?}, data: {data:p}");
 
             if buf.len() < len as _ {
                 Err(EspError::from_infallible::<ESP_ERR_INVALID_ARG>())?;
@@ -625,6 +625,7 @@ where
         response: Option<&GattResponse>,
     ) -> Result<(), EspError> {
         esp!(unsafe {
+            #[allow(clippy::unwrap_or_default)]
             esp_ble_gatts_send_response(
                 gatts_if,
                 conn_id,
@@ -676,14 +677,14 @@ where
     }
 
     unsafe extern "C" fn event_handler(
-        event: esp_gap_ble_cb_event_t,
+        event: esp_gatts_cb_event_t,
         gatts_if: esp_gatt_if_t,
         param: *mut esp_ble_gatts_cb_param_t,
     ) {
         let param = unsafe { param.as_ref() }.unwrap();
         let event = GattsEvent::from((event, param));
 
-        debug!("Got event {{ {:#?} }}", event);
+        trace!("Got event {{ {event:#?} }}");
 
         SINGLETON.call((gatts_if, event));
     }

@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Breaking
+- Added custom server certificate to `http::client::Configuration`
+- BT: `BtDriver::set_device_name` deprecated and not available with ESP-IDF 6.0+. Use the new `EspGap::set_device_name` instead
+  or the existing `EspBleGap::set_device_name`
+- BT: `BleGapEvent::ScanResult` is now a struct instead of a wrapper around esp_ble_gap_cb_param_t_ble_scan_result_evt_param  
+- Implement MQTT outbox limit and get_outbox_size()
+- Added argument `subprotocol_list` to `ws_handler` to allow subprotocols to be supported by WebSockets
+- Thread enhancements (#592). Specifically:
+ - Thread SRP (Thread-specific mDNS) is now supported and has a new API so that the user can register/unregister SRP services
+ - Option to start/stop the Thread stack (methods `Thread::start` / `Thread::stop` in place of the previous `Thread::run`)
+ - Several callbacks where actually unsound, as they were not `Send + 'static`. Now fixed
+ - Simplifications:
+  - `Thread::init` and `Thread::deinit` are now gone
+  - No option to swap the Thread Netif with a custom one, as it complicates the implementation, and I don't see the use-case (unlike with Wifi)
+ - Compatibility with ESP-IDF 5.1.6+, 5.2.4+, 5.3.2+ and 5.4+ in that the new DatasetChanged event is properly handled and does not cause the event code to panic
+- MSRV raised to 1.82
+- NVS: Removed `NvsDataType::Any` and replaced `From<nvs_type_t>` with `NvsDataType:from_nvs_type`
+- (#529) `Peripheral` and `PeripheralRef` removed and replaced with a simple pattern similar to the `esp-hal` one.
+  - Check https://github.com/esp-rs/esp-idf-hal/pull/529 for details on that change
+
+### Fixed
+- `WifiDriver::get_ap_info` not takes `&self` instead of `&mut self`. Convenience method `EspWifi::get_ap_info` that delegates
+  to `WifiDriver::get_ap_info`
+- BT: Fix BLE not working on the s3 and with ESP-IDF 5.3+
+- BT: Fix `bt_gatt_server` example not allowing reconnect after client connect (#553) and handle sububscribe/unsubscribe to indications
+- BT: Fix `EspBleGap::set_security_conf` not setting auth_req_mode, and returning ESP_ERR_INVALID_ARG when setting key sizes
+- Fix wrong conversion from `ScanType` to `u32` in Wi-Fi configuration
+- Fix wrong BT configuration version on the c6 (issue #556)
+- Fix inconsistent mutability in NVS (#567)
+- Fix #570 (c_char vs i8 mismatch on newer rustc toolchains)
+- ESP-IDF partitions support is no longer behind the `experimental` feature
+- Filesystems support is no longer behind the `experimental` feature
+- Bluetooth support is no longer behind the `experimental` feature
+- Thread support is no longer behind the `experimental` feature
+- MQTT: Fix a crash when the LWT payload is empty (#597)
+
+### Added
+- Compatibility with ESP-IDF V5.4.x and V5.5.x
+- Logging configuration enhanced with a simpler setup where Rust logs can be configured to have a verbosity which is
+  disconnected from the verbosity of the ESP-IDF native C logging (#593)
+- OTA: New method - `EspFirmwareInfoLoad::fetch_native` - returning the full native ESP-IDF image descriptor structures
+- Added `use_serde` feature, which enables the `use_serde` feature of `embedded-svc` crate, allowing to deserialize configuration structs.
+- OTA: Allow specifying image size to speed up erase
+- Bluetooth: New methods `EspBleGap::set_scan_params`, `EspBleGap::start_scanning`, `EspBleGap::stop_scanning`,
+  `EspBleGap::resolve_adv_data_by_type`, `EspBleGap::disconnect` and `gatt::set_local_mtu`
+- Bluetooth: New BLE Gatt Client `EspGattc`
+- Bluetooth Classic: Added Serial Port Profile, `spp`
+- New example, `bt_spp_acceptor` to demonstrate usage of bt classic spp profile
+- New example, `bt_ble_gap_scanner` to demonstrate usage of added ble scanning methods
+- New example, `bt_gatt_client` to demonstrate usage of added ble gatt client
+- New example, `mdns_advertise` to demonstrate mDNS service advertisement
+- NVS: Implemented `RawHandle` for `EspNvs<NvsDefault>`
+- NVS: Added `EspNvs::erase_all` to remove all data stored in an nvs namespace
+- NVS: Added `EspNvs::keys` to iterate over all stored keys
+- esp32p4: This chip has no radio, so wifi has been disabled for this
+
 ## [0.51.0] - 2025-01-15
 
 ### Breaking
@@ -29,6 +87,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Change default eth key (#502)
 - ESP IDF Partitions API (#511)
 - Expose src_addr and dst_addr in espnow recv cb (#525)
+- Add `core` field to `http::server::Configuration` to control which CPU core runs the HTTP server task
 
 ### Added
 - Compatibility with ESP-IDF v5.3.X

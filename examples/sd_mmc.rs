@@ -1,3 +1,6 @@
+#![allow(unknown_lints)]
+#![allow(unexpected_cfgs)]
+
 #[cfg(all(esp32, esp_idf_soc_sdmmc_host_supported))]
 fn main() -> anyhow::Result<()> {
     use std::fs::{read_dir, File};
@@ -5,7 +8,7 @@ fn main() -> anyhow::Result<()> {
 
     use esp_idf_svc::fs::fatfs::Fatfs;
     use esp_idf_svc::hal::gpio;
-    use esp_idf_svc::hal::prelude::*;
+    use esp_idf_svc::hal::peripherals::Peripherals;
     use esp_idf_svc::hal::sd::{
         mmc::SdMmcHostConfiguration, mmc::SdMmcHostDriver, SdCardConfiguration, SdCardDriver,
     };

@@ -4,6 +4,57 @@
 //! received while the normal firmware is running (for example, over Wi-Fi or
 //! Bluetooth.)
 //!
+//! # Requirements
+//!
+//! OTA updates needs a different partition table than the default one. For being able to update
+//! the firmware while running, we need to have at least 2 OTA partitions. Learn more about
+//! partition tables on [esp-idf documentation](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/kconfig.html#config-partition-table-type).
+//!
+//! To use a different partition than the default, you should create a CSV file (or download one
+//! from [the esp-idf repository](https://github.com/espressif/esp-idf/tree/master/components/partition_table)).
+//! For example, you can use this partition table that defines 2 OTA partitions of 1,7Mb:
+//!
+//! ```
+//! nvs,      data, nvs,     ,        0x6000,
+//! otadata,  data, ota,     ,        0x2000,
+//! phy_init, data, phy,     ,        0x1000,
+//! ota_0,    app,  ota_0,   ,        1700K,
+//! ota_1,    app,  ota_1,   ,        1700K,
+//! ```
+//!
+//! Then, configure `espflash` to use this partition table by creating an `espflash.toml`:
+//!
+//! ```
+//! partition_table = "./partition-table.csv"
+//! ```
+//!
+//! Once an OTA update have been done, the ESP will continue to boot on the second OTA partition.
+//! You can reset the booting partition by using the `--erase-parts otadata` option of `espflash`.
+//! Add it to the `runner` command in your project `.cargo/config.yml` file.
+//!
+//! # Rollback
+//!
+//! Once an OTA update happened and the ESP reboots, you have the opportunity to mark the new
+//! firmware has valid, or rollback to a previously working firmware.
+//!
+//! By default, a new firmware will continue to be selected by the bootloader until it is explicitly
+//! marked as invalid. You can change this behavior by setting the
+//! `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` option. When enabled, if a reset happen before the
+//! firmware is marked as valid, the bootloader will automatically rollback to the previous valid
+//! firmware.
+//!
+//! To enable this option, add this line to your `sdkconfig.defaults` file:
+//! ```
+//! CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+//! ```
+//! Then add `--bootloader ./target/<your arch>/debug/bootloader.bin` option to the `runner` command
+//! of your `.cargo/config.yml` file. For example:
+//!
+//! ```
+//! [target.xtensa-esp32-espidf]
+//! runner = "espflash flash --monitor --erase-parts otadata --bootloader ./target/xtensa-esp32-espidf/debug/bootloader.bin"
+//! ```
+//!
 //! # Examples
 //!
 //! The following example shows approximate steps for performing an OTA update.
@@ -149,6 +200,17 @@ impl FirmwareInfoLoader for EspFirmwareInfoLoader {
     }
 }
 
+/// Native ESP-IDF firmware information
+#[derive(Debug, Clone)]
+pub struct EspNativeFirmwareInfo<'a> {
+    /// Image header
+    pub image_header: &'a esp_image_header_t,
+    /// Segment header
+    pub segment_header: &'a esp_image_segment_header_t,
+    /// Application description
+    pub app_desc: &'a esp_app_desc_t,
+}
+
 /// A firmware info loader that tries to read the firmware info directly
 /// from a user-supplied buffer which can be re-used for other purposes afterwards.
 ///
@@ -156,22 +218,38 @@ impl FirmwareInfoLoader for EspFirmwareInfoLoader {
 pub struct EspFirmwareInfoLoad;
 
 impl EspFirmwareInfoLoad {
-    /// Fetches firmware information from the firmware binary data chunk loaded so far.
+    /// Fetches the native ESP-IDF firmware information from the firmware binary data chunk loaded so far.
     ///
-    /// Returns `true` if the information was successfully fetched.
-    /// Returns `false` if the firmware data has not been loaded completely yet.
-    pub fn fetch(&self, data: &[u8], info: &mut FirmwareInfo) -> Result<bool, EspIOError> {
+    /// Returns `Some(EspNativeFirmwareInfo)` if the information was successfully fetched.
+    /// Returns `None` if the firmware data has not been loaded completely yet.
+    pub fn fetch_native<'a>(&self, data: &'a [u8]) -> Option<EspNativeFirmwareInfo<'a>> {
         let loaded = data.len()
             >= mem::size_of::<esp_image_header_t>()
                 + mem::size_of::<esp_image_segment_header_t>()
                 + mem::size_of::<esp_app_desc_t>();
 
         if loaded {
+            let image_header_slice = &data[..mem::size_of::<esp_image_header_t>()];
+            let image_segment_header_slice = &data[mem::size_of::<esp_image_header_t>()
+                ..mem::size_of::<esp_image_header_t>()
+                    + mem::size_of::<esp_image_segment_header_t>()];
             let app_desc_slice = &data[mem::size_of::<esp_image_header_t>()
                 + mem::size_of::<esp_image_segment_header_t>()
                 ..mem::size_of::<esp_image_header_t>()
                     + mem::size_of::<esp_image_segment_header_t>()
                     + mem::size_of::<esp_app_desc_t>()];
+
+            let image_header = unsafe {
+                (image_header_slice.as_ptr() as *const esp_image_header_t)
+                    .as_ref()
+                    .unwrap()
+            };
+
+            let segment_header = unsafe {
+                (image_segment_header_slice.as_ptr() as *const esp_image_segment_header_t)
+                    .as_ref()
+                    .unwrap()
+            };
 
             let app_desc = unsafe {
                 (app_desc_slice.as_ptr() as *const esp_app_desc_t)
@@ -179,7 +257,23 @@ impl EspFirmwareInfoLoad {
                     .unwrap()
             };
 
-            Self::load_firmware_info(info, app_desc)?;
+            Some(EspNativeFirmwareInfo {
+                image_header,
+                segment_header,
+                app_desc,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Fetches firmware information from the firmware binary data chunk loaded so far.
+    ///
+    /// Returns `true` if the information was successfully fetched.
+    /// Returns `false` if the firmware data has not been loaded completely yet.
+    pub fn fetch(&self, data: &[u8], info: &mut FirmwareInfo) -> Result<bool, EspIOError> {
+        if let Some(native_info) = self.fetch_native(data) {
+            Self::load_firmware_info(info, native_info.app_desc)?;
 
             Ok(true)
         } else {
@@ -445,6 +539,18 @@ impl EspOta {
     ///
     /// Returns an error if OTA could not be initiated (OTA partition not found, flash error).
     pub fn initiate_update(&mut self) -> Result<EspOtaUpdate<'_>, EspError> {
+        self.initiate_update_with_known_size(OTA_SIZE_UNKNOWN as usize)
+    }
+
+    /// We need to erase enough space in flash for the new image. By default `initiate_update`
+    /// passes `OTA_SIZE_UNKNOWN` which causes the entire partition to be erased, but this is slow
+    /// if the flash size is large and the image is relatively small. By setting the known size of
+    /// the image, we erase only what needs to be erased. If `file_size` is smaller than the size
+    /// of the actual image written, this will result in a corrupted image.
+    pub fn initiate_update_with_known_size(
+        &mut self,
+        file_size: usize,
+    ) -> Result<EspOtaUpdate<'_>, EspError> {
         // This might return a null pointer in case no valid partition can be found.
         // We don't have to handle this error in here, as this will implicitly trigger an error
         // as soon as the null pointer is provided to `esp_ota_begin`.
@@ -452,7 +558,7 @@ impl EspOta {
 
         let mut handle: esp_ota_handle_t = Default::default();
 
-        esp!(unsafe { esp_ota_begin(partition, OTA_SIZE_UNKNOWN as usize, &mut handle) })?;
+        esp!(unsafe { esp_ota_begin(partition, file_size, &mut handle) })?;
 
         Ok(EspOtaUpdate {
             update_partition: partition,

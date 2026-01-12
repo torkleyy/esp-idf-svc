@@ -5,6 +5,9 @@
 //!
 //! See the comment below as to how to build the example with ESP IDF 5+.
 
+#![allow(unknown_lints)]
+#![allow(unexpected_cfgs)]
+
 pub fn main() {
     #[cfg(esp_idf_version_major = "4")]
     example::main().unwrap();
@@ -118,7 +121,7 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 
         // Send message and receive it back
         let message = "Hello, World!";
-        info!("Websocket send, text: {}", message);
+        info!("Websocket send, text: {message}");
         client.send(FrameType::Text(false), message.as_bytes())?;
         assert_eq!(rx.recv(), Ok(ExampleEvent::MessageReceived));
 

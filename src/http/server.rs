@@ -58,6 +58,8 @@ use embedded_svc::http::headers::content_type;
 use embedded_svc::http::*;
 use embedded_svc::io::{ErrorType, Read, Write};
 
+use esp_idf_hal::cpu::Core;
+
 use crate::sys::*;
 
 use uncased::{Uncased, UncasedStr};
@@ -83,6 +85,7 @@ pub struct Configuration {
     pub http_port: u16,
     pub ctrl_port: u16,
     pub https_port: u16,
+    pub core: Option<Core>,
     pub max_sessions: usize,
     pub session_timeout: Duration,
     pub stack_size: usize,
@@ -103,6 +106,7 @@ impl Default for Configuration {
             http_port: 80,
             ctrl_port: 32768,
             https_port: 443,
+            core: None,
             max_sessions: 16,
             session_timeout: Duration::from_secs(20 * 60),
             #[cfg(not(esp_idf_esp_https_server_enable))]
@@ -141,7 +145,7 @@ impl From<&Configuration> for Newtype<httpd_config_t> {
             ))]
             task_caps: (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
             stack_size: conf.stack_size,
-            core_id: i32::MAX,
+            core_id: conf.core.map(|core| core.into()).unwrap_or(i32::MAX),
             server_port: conf.http_port,
             ctrl_port: conf.ctrl_port,
             max_open_sockets: conf.max_open_sockets as _,
@@ -381,7 +385,7 @@ impl<'a> EspHttpServer<'a> {
             }
         }
 
-        info!("Started Httpd server with config {:?}", conf);
+        info!("Started Httpd server with config {conf:?}");
 
         let server = Self {
             sd: handle,
@@ -1133,22 +1137,15 @@ impl<'a> EspHttpConnection<'a> {
         E: Debug,
     {
         if self.headers.is_some() {
-            info!(
-                "About to handle internal error [{:?}], response not sent yet",
-                &error
-            );
+            info!("About to handle internal error [{error:?}], response not sent yet");
 
             if let Err(error2) = self.render_error(&error) {
                 warn!(
-                    "Internal error[{}] while rendering another internal error:\n{:?}",
-                    error2, error
+                    "Internal error[{error2}] while rendering another internal error:\n{error:?}"
                 );
             }
         } else {
-            warn!(
-                "Unhandled internal error [{:?}], response is already sent",
-                error
-            );
+            warn!("Unhandled internal error [{error:?}], response is already sent");
         }
     }
 
@@ -1575,19 +1572,31 @@ pub mod ws {
         /// made to that URI, receiving a different `EspHttpWsConnection` each
         /// call.
         ///
+        /// # Arguments
+        ///
+        /// * `uri` - The URI to connect to
+        /// * `subprotocol_list` - An optional string slice containing a comma-separated
+        ///   list of subprotocols to be supported by this handler
+        /// * handler: the handler
+        ///
         /// Note that Websockets functionality is gated behind an SDK flag.
         /// See [`crate::ws`](esp-idf-svc::ws)
-        pub fn ws_handler<H, E>(&mut self, uri: &str, handler: H) -> Result<&mut Self, EspError>
+        pub fn ws_handler<H, E>(
+            &mut self,
+            uri: &str,
+            subprotocol_list: Option<&str>,
+            handler: H,
+        ) -> Result<&mut Self, EspError>
         where
             H: for<'r> Fn(&'r mut EspHttpWsConnection) -> Result<(), E> + Send + Sync + 'a,
             E: Debug,
         {
-            let c_str = to_cstring_arg(uri)?;
+            let uri_c_str = to_cstring_arg(uri)?;
 
             let (req_handler, close_handler) = self.to_native_ws_handler(self.sd, handler);
 
-            let conf = httpd_uri_t {
-                uri: c_str.as_ptr() as _,
+            let mut conf = httpd_uri_t {
+                uri: uri_c_str.as_ptr() as _,
                 method: Newtype::<ffi::c_uint>::from(Method::Get).0,
                 user_ctx: Box::into_raw(Box::new(req_handler)) as *mut _,
                 handler: Some(EspHttpServer::handle_req),
@@ -1595,6 +1604,12 @@ pub mod ws {
                 // TODO: Expose as a parameter in future: handle_ws_control_frames: true,
                 ..Default::default()
             };
+
+            let subproto_c_str; // SAFETY: same scope as httpd_register_uri_handler required!
+            if let Some(subprotocol_list) = subprotocol_list {
+                subproto_c_str = to_cstring_arg(subprotocol_list)?;
+                conf.supported_subprotocol = subproto_c_str.as_ptr();
+            }
 
             esp!(unsafe { crate::sys::httpd_register_uri_handler(self.sd, &conf) })?;
 
@@ -1611,10 +1626,10 @@ pub mod ws {
 
             info!(
                 "Registered Httpd server WS handler for URI \"{}\"",
-                c_str.to_str().unwrap()
+                uri_c_str.to_str().unwrap()
             );
 
-            self.registrations.push((c_str, conf));
+            self.registrations.push((uri_c_str, conf));
 
             Ok(self)
         }
@@ -1636,7 +1651,7 @@ pub mod ws {
         where
             E: Debug,
         {
-            warn!("Unhandled internal error [{:?}]:\n{:?}", error, error);
+            warn!("Unhandled internal error [{error:?}]:\n{error:?}");
 
             ESP_OK as _
         }

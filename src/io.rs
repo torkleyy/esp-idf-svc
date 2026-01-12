@@ -9,13 +9,26 @@ pub mod vfs {
     use crate::hal::uart::UartDriver;
     #[cfg(esp_idf_soc_usb_serial_jtag_supported)]
     use crate::hal::usb_serial::UsbSerialDriver;
-    use crate::sys::{
-        self, esp_vfs_dev_uart_use_driver, esp_vfs_dev_uart_use_nonblocking, EspError,
-    };
-    #[cfg(esp_idf_soc_usb_serial_jtag_supported)]
+    use crate::sys::{self, EspError};
+    #[cfg(not(esp_idf_version_at_least_6_0_0))]
+    use crate::sys::{esp_vfs_dev_uart_use_driver, esp_vfs_dev_uart_use_nonblocking};
+    #[cfg(all(
+        not(esp_idf_version_at_least_6_0_0),
+        esp_idf_soc_usb_serial_jtag_supported
+    ))]
     use crate::sys::{esp_vfs_usb_serial_jtag_use_driver, esp_vfs_usb_serial_jtag_use_nonblocking};
+    #[cfg(esp_idf_version_at_least_6_0_0)]
+    use crate::sys::{
+        uart_vfs_dev_use_driver as esp_vfs_dev_uart_use_driver,
+        uart_vfs_dev_use_nonblocking as esp_vfs_dev_uart_use_nonblocking,
+    };
+    #[cfg(all(esp_idf_version_at_least_6_0_0, esp_idf_soc_usb_serial_jtag_supported))]
+    use crate::sys::{
+        usb_serial_jtag_vfs_use_driver as esp_vfs_usb_serial_jtag_use_driver,
+        usb_serial_jtag_vfs_use_nonblocking as esp_vfs_usb_serial_jtag_use_nonblocking,
+    };
 
-    #[cfg(all(feature = "experimental", feature = "alloc"))]
+    #[cfg(feature = "alloc")]
     extern crate alloc;
 
     /// Represents a mounted EventFD pseudo-filesystem.
@@ -48,13 +61,13 @@ pub mod vfs {
     }
 
     /// Represents a mounted SPIFFS filesystem.
-    #[cfg(all(feature = "experimental", feature = "alloc"))]
+    #[cfg(feature = "alloc")]
     pub struct MountedSpiffs<T> {
         _spiffs: T,
         path: alloc::ffi::CString,
     }
 
-    #[cfg(all(feature = "experimental", feature = "alloc"))]
+    #[cfg(feature = "alloc")]
     impl<T> MountedSpiffs<T> {
         /// Mount a SPIFFS filesystem.
         ///
@@ -84,7 +97,7 @@ pub mod vfs {
         }
     }
 
-    #[cfg(all(feature = "experimental", feature = "alloc"))]
+    #[cfg(feature = "alloc")]
     impl<T> Drop for MountedSpiffs<T> {
         fn drop(&mut self) {
             sys::esp!(unsafe { sys::esp_vfs_spiffs_unregister(self.path.as_ptr()) }).unwrap();
@@ -92,7 +105,7 @@ pub mod vfs {
     }
 
     /// Represents a mounted FAT filesystem.
-    #[cfg(all(feature = "experimental", feature = "alloc"))]
+    #[cfg(feature = "alloc")]
     pub struct MountedFatfs<T> {
         _handle: *mut sys::FATFS,
         _fatfs: T,
@@ -100,7 +113,7 @@ pub mod vfs {
         drive: u8,
     }
 
-    #[cfg(all(feature = "experimental", feature = "alloc"))]
+    #[cfg(feature = "alloc")]
     impl<T> MountedFatfs<T> {
         /// Mount a FAT filesystem.
         ///
@@ -141,7 +154,7 @@ pub mod vfs {
         }
     }
 
-    #[cfg(all(feature = "experimental", feature = "alloc"))]
+    #[cfg(feature = "alloc")]
     impl<T> Drop for MountedFatfs<T> {
         fn drop(&mut self) {
             let drive_path = crate::fs::fatfs::Fatfs::<()>::drive_path_from(self.drive);

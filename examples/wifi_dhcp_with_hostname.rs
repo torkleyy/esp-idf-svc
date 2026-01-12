@@ -5,11 +5,14 @@
 //! Once the wifi is connected, the hostname will be set to "foo"
 //! Try pinging it from your PC with `ping foo`
 
+#![allow(unknown_lints)]
+#![allow(unexpected_cfgs)]
+
 use core::convert::TryInto;
 
 use embedded_svc::wifi::{AuthMethod, ClientConfiguration, Configuration as WifiConfiguration};
 
-use esp_idf_svc::hal::prelude::Peripherals;
+use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::ipv4::{
     ClientConfiguration as IpClientConfiguration, Configuration as IpConfiguration,
     DHCPClientSettings,
@@ -40,7 +43,7 @@ fn main() -> anyhow::Result<()> {
 
     let ip_info = wifi.wifi().sta_netif().get_ip_info()?;
 
-    info!("Wifi Interface info: {:?}", ip_info);
+    info!("Wifi Interface info: {ip_info:?}");
 
     loop {
         std::thread::sleep(core::time::Duration::from_secs(5));

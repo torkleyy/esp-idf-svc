@@ -3,6 +3,9 @@
 //! Add your own ssid and password for the access point
 //! Add your own gateway IP, netmask, and local device IP for interface configuration
 
+#![allow(unknown_lints)]
+#![allow(unexpected_cfgs)]
+
 use core::convert::TryInto;
 
 use std::net::Ipv4Addr;
@@ -10,7 +13,7 @@ use std::str::FromStr;
 
 use embedded_svc::wifi::{AuthMethod, ClientConfiguration, Configuration as WifiConfiguration};
 
-use esp_idf_svc::hal::prelude::Peripherals;
+use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::ipv4::{
     ClientConfiguration as IpClientConfiguration, ClientSettings as IpClientSettings,
     Configuration as IpConfiguration, Mask, Subnet,
@@ -48,7 +51,7 @@ fn main() -> anyhow::Result<()> {
 
     let ip_info = wifi.wifi().sta_netif().get_ip_info()?;
 
-    info!("Wifi Interface info: {:?}", ip_info);
+    info!("Wifi Interface info: {ip_info:?}");
 
     info!("Shutting down in 5s...");
 

@@ -2,7 +2,7 @@
 
 use embedded_svc::wifi::{AuthMethod, ClientConfiguration, Configuration};
 
-use esp_idf_svc::hal::prelude::Peripherals;
+use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
 use esp_idf_svc::wifi::{WpsConfig, WpsFactoryInfo, WpsStatus, WpsType};
@@ -73,7 +73,7 @@ fn main() -> anyhow::Result<()> {
     info!("Wifi netif up");
 
     let ip_info = wifi.wifi().sta_netif().get_ip_info()?;
-    info!("Wifi DHCP info: {:?}", ip_info);
+    info!("Wifi DHCP info: {ip_info:?}");
 
     info!("Shutting down in 5s...");
 
