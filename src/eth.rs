@@ -51,16 +51,16 @@ pub enum RmiiEthChipset {
 }
 
 #[cfg(all(esp32, esp_idf_eth_use_esp32_emac))]
-pub enum RmiiClockConfig {
-    Input(gpio::Gpio0),
-    OutputGpio0(gpio::Gpio0),
-    /// This according to ESP-IDF is for "testing" only    
-    OutputGpio16(gpio::Gpio16),
-    OutputInvertedGpio17(gpio::Gpio17),
+pub enum RmiiClockConfig<'a> {
+    Input(gpio::Gpio0<'a>),
+    OutputGpio0(gpio::Gpio0<'a>),
+    /// This according to ESP-IDF is for "testing" only
+    OutputGpio16(gpio::Gpio16<'a>),
+    OutputInvertedGpio17(gpio::Gpio17<'a>),
 }
 
 #[cfg(all(esp32, esp_idf_eth_use_esp32_emac))]
-impl RmiiClockConfig {
+impl RmiiClockConfig<'_> {
     fn eth_mac_clock_config(&self) -> eth_mac_clock_config_t {
         let rmii = match self {
             Self::Input(_) => eth_mac_clock_config_t__bindgen_ty_2 {
@@ -300,7 +300,7 @@ impl<'d> EthDriver<'d, RmiiEth> {
         rmii_tx_en: gpio::Gpio21,
         rmii_txd0: gpio::Gpio19,
         rmii_mdio: impl gpio::InputPin + gpio::OutputPin + 'd,
-        rmii_ref_clk_config: RmiiClockConfig,
+        rmii_ref_clk_config: RmiiClockConfig<'d>,
         rst: Option<impl gpio::OutputPin + 'd>,
         chipset: RmiiEthChipset,
         phy_addr: Option<u32>,
@@ -335,7 +335,7 @@ impl<'d> EthDriver<'d, RmiiEth> {
         _rmii_tx_en: gpio::Gpio21,
         _rmii_txd0: gpio::Gpio19,
         rmii_mdio: impl gpio::InputPin + gpio::OutputPin + 'd,
-        rmii_ref_clk_config: RmiiClockConfig,
+        rmii_ref_clk_config: RmiiClockConfig<'d>,
         rst: Option<impl gpio::OutputPin + 'd>,
         chipset: RmiiEthChipset,
         phy_addr: Option<u32>,
@@ -381,7 +381,11 @@ impl<'d> EthDriver<'d, RmiiEth> {
         Ok(phy)
     }
 
-    fn rmii_mac(mdc: i32, mdio: i32, clk_config: &RmiiClockConfig) -> *mut esp_eth_mac_t {
+    fn rmii_mac(
+        mdc: i32,
+        mdio: i32,
+        clk_config: &RmiiClockConfig<'_>,
+    ) -> *mut esp_eth_mac_t {
         #[cfg(esp_idf_version_major = "4")]
         let mac = {
             let mut config = Self::eth_mac_default_config(mdc, mdio);
