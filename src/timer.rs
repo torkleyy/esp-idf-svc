@@ -527,15 +527,11 @@ pub mod embassy_time_driver {
             let mut inner = guard.borrow_mut();
 
             if inner.timer.is_none() {
-                // Driver is always statically allocated, so this is safe
-                let static_self: &'static Self = unsafe { core::mem::transmute(self) };
-
                 inner.timer = Some(
                     service
-                        .timer(move || {
+                        .timer(|| {
                             // Signal helper task instead of processing directly
                             // This avoids calling waker.wake() from high-priority context
-                            let _ = static_self; // Keep reference for timer lifetime
                             signal_helper();
                         })
                         .unwrap(),
