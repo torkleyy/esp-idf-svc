@@ -404,6 +404,7 @@ pub mod embassy_time_driver {
     }
 
     static HELPER_SIGNAL: OnceLock<(StdMutex<HelperSignal>, Condvar)> = OnceLock::new();
+    static HELPER_TASK: OnceLock<()> = OnceLock::new();
 
     struct EspDriverInner {
         queue: embassy_time_queue_utils::Queue,
@@ -457,33 +458,32 @@ pub mod embassy_time_driver {
     }
 
     fn ensure_helper_task() {
-        HELPER_SIGNAL.get_or_init(|| {
-            let signal = (
+        let signal = HELPER_SIGNAL.get_or_init(|| {
+            (
                 StdMutex::new(HelperSignal { pending: false }),
                 Condvar::new(),
-            );
+            )
+        });
+
+        HELPER_TASK.get_or_init(|| {
+            let (mutex, cvar) = signal;
 
             thread::Builder::new()
                 .name("embassy-timer".into())
                 .stack_size(3200)
-                .spawn(|| {
-                    let (mutex, cvar) = HELPER_SIGNAL.get().unwrap();
-                    loop {
-                        // Wait for signal
-                        let mut guard = mutex.lock().unwrap();
-                        while !guard.pending {
-                            guard = cvar.wait(guard).unwrap();
-                        }
-                        guard.pending = false;
-                        drop(guard);
-
-                        // Process all expired timers until queue is stable
-                        DRIVER.inner.lock().borrow_mut().schedule_next_expiration();
+                .spawn(move || loop {
+                    // Wait for signal
+                    let mut guard = mutex.lock().unwrap();
+                    while !guard.pending {
+                        guard = cvar.wait(guard).unwrap();
                     }
+                    guard.pending = false;
+                    drop(guard);
+
+                    // Process all expired timers until queue is stable
+                    DRIVER.inner.lock().borrow_mut().schedule_next_expiration();
                 })
                 .expect("failed to spawn embassy-timer helper task");
-
-            signal
         });
     }
 
