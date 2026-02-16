@@ -465,7 +465,7 @@ pub mod embassy_time_driver {
 
             thread::Builder::new()
                 .name("embassy-timer".into())
-                .stack_size(2048)
+                .stack_size(3200)
                 .spawn(|| {
                     let (mutex, cvar) = HELPER_SIGNAL.get().unwrap();
                     loop {
