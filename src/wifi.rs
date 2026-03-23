@@ -2299,6 +2299,8 @@ pub enum WifiEvent<'a> {
         ),
     )))]
     HomeChannelChange(HomeChannelChange),
+
+    Unknown,
 }
 
 unsafe impl EspEventSource for WifiEvent<'_> {
@@ -2386,7 +2388,10 @@ impl EspEventDeserializer for WifiEvent<'_> {
                     new_snd: payload.new_snd.try_into().ok(),
                 })
             }
-            _ => panic!("unknown event ID: {event_id}"),
+            _ => {
+                ::log::warn!("unknown event ID: {event_id}");
+                WifiEvent::Unknown
+            }
         }
     }
 }
